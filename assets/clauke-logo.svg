@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none">
+  <!-- Cloak / outer wrap -->
+  <path d="M96 24C96 24 104 36 104 64C104 92 88 108 64 108C40 108 24 92 24 64C24 36 32 24 32 24" stroke="url(#cloak)" stroke-width="6" stroke-linecap="round" fill="none"/>
+  <!-- Inner cloak layer -->
+  <path d="M84 34C84 34 90 44 90 64C90 84 78 96 64 96C50 96 38 84 38 64C38 44 44 34 44 34" stroke="url(#inner)" stroke-width="4" stroke-linecap="round" fill="none" opacity="0.5"/>
+  <!-- Terminal cursor / prompt -->
+  <text x="52" y="74" font-family="monospace" font-weight="700" font-size="32" fill="url(#cursor)">_</text>
+  <defs>
+    <linearGradient id="cloak" x1="24" y1="24" x2="104" y2="108">
+      <stop offset="0%" stop-color="#c4b5fd"/>
+      <stop offset="100%" stop-color="#7c3aed"/>
+    </linearGradient>
+    <linearGradient id="inner" x1="38" y1="34" x2="90" y2="96">
+      <stop offset="0%" stop-color="#a78bfa"/>
+      <stop offset="100%" stop-color="#6d28d9"/>
+    </linearGradient>
+    <linearGradient id="cursor" x1="52" y1="50" x2="70" y2="74">
+      <stop offset="0%" stop-color="#e9e5ff"/>
+      <stop offset="100%" stop-color="#c4b5fd"/>
+    </linearGradient>
+  </defs>
+</svg>
