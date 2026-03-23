@@ -49,7 +49,7 @@ impl ClaudeRunner {
         }
         if let Some(sp) = system_prompt {
             if !sp.is_empty() {
-                cmd.args(["--system-prompt", sp]);
+                cmd.args(["--append-system-prompt", sp]);
             }
         }
         if let Some(session_id) = resume {
@@ -71,11 +71,16 @@ impl ClaudeRunner {
                 format!("{}\n{}", img_section, prompt)
             }
         };
-        cmd.args(["-p", &final_prompt]);
+        // Stream-json I/O: prompt delivered via stdin, pipe stays open for steering.
+        // -p is REQUIRED for --input-format and --output-format to take effect.
+        // With --input-format stream-json, -p processes each JSON line immediately
+        // (no EOF wait — that only applies to --input-format text).
+        cmd.args(["-p", "--input-format", "stream-json"]);
+        cmd.stdin(Stdio::piped());
+
         if let Some(m) = model {
             cmd.args(["--model", m]);
         }
-        cmd.stdin(Stdio::null());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
         cmd.kill_on_drop(true);
@@ -91,9 +96,35 @@ impl ClaudeRunner {
             cmd.current_dir(dir);
         }
 
-        let child = cmd.spawn()?;
+        let mut child = cmd.spawn()?;
         let cancel = Arc::new(Notify::new());
-        let stdin = Arc::new(Mutex::new(None));
+
+        // Capture stdin and send the initial prompt as stream-json message.
+        // The stream-json input format expects:
+        //   {"type":"user","message":{"role":"user","content":"..."},"parent_tool_use_id":null,"session_id":null}
+        let child_stdin = child.stdin.take();
+        let stdin = Arc::new(Mutex::new(child_stdin));
+        let stdin_clone = Arc::clone(&stdin);
+        let prompt_json = serde_json::json!({
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": final_prompt,
+            },
+            "parent_tool_use_id": null,
+            "session_id": null,
+        });
+        let prompt_str = serde_json::to_string(&prompt_json)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        // Spawn a task to write the initial prompt without blocking spawn()
+        tokio::spawn(async move {
+            let mut guard = stdin_clone.lock().await;
+            if let Some(ref mut w) = *guard {
+                let _ = w.write_all(prompt_str.as_bytes()).await;
+                let _ = w.write_all(b"\n").await;
+                let _ = w.flush().await;
+            }
+        });
 
         Ok(Self { child, cancel, stdin })
     }
@@ -214,8 +245,19 @@ impl ClaudeProcess {
     pub async fn steer(&self, message: &str) -> Result<(), String> {
         let mut guard = self.stdin.lock().await;
         if let Some(ref mut stdin) = *guard {
+            let msg = serde_json::json!({
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": message,
+                },
+                "parent_tool_use_id": null,
+                "session_id": null,
+            });
+            let json_str = serde_json::to_string(&msg)
+                .map_err(|e| format!("Failed to serialize steer message: {}", e))?;
             stdin
-                .write_all(message.as_bytes())
+                .write_all(json_str.as_bytes())
                 .await
                 .map_err(|e| format!("Failed to write to stdin: {}", e))?;
             stdin

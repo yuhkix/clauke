@@ -58,8 +58,37 @@ npm run tauri dev
 3. Rust spawns `claude -p "prompt" --output-format stream-json [--model X] [--resume Y]`
 4. Each JSON line from stdout is emitted as a `claude-event` Tauri event
 5. Frontend's `processClaudeEvent()` parses events into reactive message state
-6. Tool calls render as collapsible cards; Agent tool calls track nested sub-agent activity
-7. Multi-tab sessions persist to localStorage; closed tabs are archived
+6. Thinking blocks render as collapsible sections (collapsed by default with preview)
+7. Tool calls render as collapsible cards; Agent tool calls track nested sub-agent activity
+8. Multi-tab sessions persist to localStorage; closed tabs are archived
+
+## Event Types
+
+The stream-json format from Claude CLI produces these event types, all handled in `claude.ts`:
+
+| Event type | Description |
+|---|---|
+| `system` | Init or auto-compact notifications |
+| `assistant` | Text, thinking, or tool_use content blocks |
+| `content_block_start` | Streaming start for text, thinking, or tool_use blocks |
+| `content_block_delta` | Streaming deltas: `text_delta`, `thinking_delta`, `input_json_delta` |
+| `content_block_stop` | End of a streaming content block |
+| `tool_result` / `tool` | Tool execution results |
+| `result` | Final completion or tool result with usage stats |
+| `error` | Error messages |
+| `raw` | Non-JSON output (fallback) |
+
+### Thinking blocks
+
+Claude's extended thinking (`thinking` content blocks) are parsed from three sources:
+- `assistant` events with `message.type === "thinking"`
+- `content_block_start` with `content_block.type === "thinking"`
+- `content_block_delta` with `delta.type === "thinking_delta"`
+
+They render as collapsible sections in `MessageBubble.svelte` — collapsed by default
+with an 80-char preview, expandable to show full markdown-rendered thinking with a
+400px max-height scrollable area. Thinking blocks are truncated to 500 chars for
+localStorage persistence.
 
 ## Conventions
 

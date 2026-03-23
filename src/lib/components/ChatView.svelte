@@ -9,12 +9,14 @@
     autoScrollEnabled = true,
     onFork,
     onCopy,
+    onEditMessage,
   }: {
     messages: ChatMessage[];
     isRunning: boolean;
     autoScrollEnabled?: boolean;
     onFork?: (messageId: string) => void;
     onCopy?: (messageId: string) => void;
+    onEditMessage?: (messageId: string) => void;
   } = $props();
 
   let scrollContainer: HTMLDivElement;
@@ -77,7 +79,7 @@
     <div class="messages">
       {#each messages as message (message.id)}
         {#if message.role === "system"}
-          <div class="system-divider">
+          <div class="system-divider" id={message.id}>
             <div class="system-line"></div>
             <span class="system-label">
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -91,7 +93,7 @@
             <div class="system-line"></div>
           </div>
         {:else}
-          <MessageBubble {message} {onFork} {onCopy} />
+          <MessageBubble {message} {onFork} {onCopy} onEdit={onEditMessage} />
         {/if}
       {/each}
 
@@ -234,5 +236,15 @@
 
   .system-label svg {
     opacity: 0.6;
+  }
+
+  /* Search highlight flash */
+  :global(.search-highlight) {
+    animation: searchFlash 1.5s ease-out;
+  }
+
+  @keyframes searchFlash {
+    0% { background: rgba(167, 139, 250, 0.15); }
+    100% { background: transparent; }
   }
 </style>

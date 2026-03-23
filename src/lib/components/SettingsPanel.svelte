@@ -519,7 +519,7 @@
           <div class="row-col">
             <div class="label-group">
               <span class="label">system prompt</span>
-              <span class="desc">appended to default system prompt</span>
+              <span class="desc">default for new tabs (per-tab override in input bar)</span>
             </div>
             <textarea
               class="sys-prompt"

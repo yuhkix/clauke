@@ -9,24 +9,48 @@
     onStop,
     onCommand,
     isRunning,
+    canSteer = false,
     commands = BUILTIN_COMMANDS,
     model = $bindable<ClaudeModel>("sonnet"),
     effort = $bindable<EffortLevel>("high"),
     permissionMode = $bindable<PermissionMode>("bypass"),
+    hasSystemPrompt = false,
+    onToggleSystemPrompt,
+    prefill = "",
+    onPrefillConsumed,
   }: {
     onSend: (prompt: string, images: string[]) => void;
     onSteer: (message: string) => void;
     onStop: () => void;
     onCommand: (cmd: SlashCommand) => void;
     isRunning: boolean;
+    /** Whether steering (follow-up messages) is available (interactive mode only) */
+    canSteer?: boolean;
     commands?: SlashCommand[];
     model: ClaudeModel;
     effort: EffortLevel;
     permissionMode: PermissionMode;
+    hasSystemPrompt?: boolean;
+    onToggleSystemPrompt?: () => void;
+    /** Pre-fill the input with this text (e.g., from edit & resend) */
+    prefill?: string;
+    onPrefillConsumed?: () => void;
   } = $props();
 
   let input = $state("");
   let textarea: HTMLTextAreaElement;
+
+  // Consume prefill from parent (edit & resend)
+  $effect(() => {
+    if (prefill) {
+      input = prefill;
+      if (onPrefillConsumed) onPrefillConsumed();
+      requestAnimationFrame(() => {
+        autoResize();
+        textarea?.focus();
+      });
+    }
+  });
   let modelOpen = $state(false);
   let effortOpen = $state(false);
   let permOpen = $state(false);
@@ -145,7 +169,8 @@
     if (!text && attachedImages.length === 0) return;
 
     if (isRunning) {
-      // Steering: send message to running process
+      // Steering: only available in interactive mode
+      if (!canSteer) return;
       if (text) {
         onSteer(text);
         input = "";
@@ -342,8 +367,9 @@
       bind:this={textarea}
       bind:value={input}
       class="input"
-      class:steering={isRunning}
-      placeholder={isRunning ? "steer claude\u2026" : "message"}
+      class:steering={isRunning && canSteer}
+      placeholder={isRunning ? (canSteer ? "steer claude\u2026" : "running\u2026") : "message"}
+      disabled={isRunning && !canSteer}
       rows="1"
       onkeydown={handleKeydown}
       oninput={handleInput}
@@ -363,6 +389,20 @@
             <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
           </svg>
         </button>
+
+        <!-- System prompt toggle -->
+        {#if onToggleSystemPrompt}
+          <button
+            class="chip"
+            class:chip-active={hasSystemPrompt}
+            onclick={onToggleSystemPrompt}
+            title="System prompt"
+          >
+            <svg class="chip-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+            </svg>
+          </button>
+        {/if}
 
         <span class="separator"></span>
 
@@ -523,7 +563,7 @@
       </div>
 
       <div class="controls-right">
-        {#if isRunning}
+        {#if isRunning && canSteer}
           <button
             class="btn-action btn-steer"
             onclick={send}
@@ -643,6 +683,16 @@
   .input.steering::placeholder {
     color: var(--accent, #a78bfa);
     opacity: 0.5;
+  }
+
+  .input:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+
+  .input:disabled::placeholder {
+    color: var(--text-tertiary);
+    opacity: 0.6;
   }
 
   /* ── Slash command menu ── */
@@ -792,6 +842,13 @@
 
   .chip-icon {
     opacity: 0.5;
+  }
+
+  .chip-active {
+    color: rgba(167, 139, 250, 0.8);
+  }
+  .chip-active .chip-icon {
+    opacity: 0.8;
   }
 
   .chip-plan {

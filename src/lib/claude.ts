@@ -31,6 +31,11 @@ function getAgentStack(tabId: string): string[] {
   return stack;
 }
 
+/** Clean up internal state for a closed tab to prevent memory leaks. */
+export function cleanupTabState(tabId: string): void {
+  agentStacks.delete(tabId);
+}
+
 export interface EventResult {
   modified: boolean;
   sessionId?: string;
@@ -39,6 +44,14 @@ export interface EventResult {
   contextTokens?: number;
   /** True when a context compaction was detected */
   compacted?: boolean;
+  /** If set, the CLI is waiting for a permission decision */
+  permissionRequest?: {
+    toolName: string;
+    toolInput: Record<string, unknown>;
+    description?: string;
+  };
+  /** True when the current turn is complete (final result event) */
+  turnComplete?: boolean;
 }
 
 /**
@@ -81,6 +94,17 @@ export function processClaudeEvent(
     const block: ContentBlock = { type: "text", text: "" };
     msg.content.push(block);
     return block as ContentBlock & { type: "text" };
+  }
+
+  /** Get (or create) the last thinking block to append to */
+  function getLastThinkingBlock(msg: ChatMessage): ContentBlock & { type: "thinking" } {
+    const last = msg.content[msg.content.length - 1];
+    if (last && last.type === "thinking") {
+      return last;
+    }
+    const block: ContentBlock = { type: "thinking", text: "" };
+    msg.content.push(block);
+    return block as ContentBlock & { type: "thinking" };
   }
 
   /**
@@ -287,7 +311,10 @@ export function processClaudeEvent(
       const message = event.message as Record<string, unknown> | undefined;
       if (!message) return UNMODIFIED;
 
-      if (message.type === "text") {
+      if (message.type === "thinking") {
+        // Thinking block — append to current thinking block
+        getLastThinkingBlock(msg).text += (message.thinking as string) || (message.text as string) || "";
+      } else if (message.type === "text") {
         // New text block starting → any pending tool calls have finished
         markPendingToolsComplete(msg);
         getLastTextBlock(msg).text += (message.text as string) || "";
@@ -309,7 +336,14 @@ export function processClaudeEvent(
         const content = message.content as Array<Record<string, unknown>>;
         if (Array.isArray(content)) {
           for (const block of content) {
-            if (block.type === "text") {
+            if (block.type === "thinking") {
+              getLastThinkingBlock(msg).text += (block.thinking as string) || (block.text as string) || "";
+            } else if (block.type === "text") {
+              // If the last content is already text with content, start a new block
+              const lastContent = msg.content[msg.content.length - 1];
+              if (lastContent && lastContent.type === "text" && lastContent.text) {
+                msg.content.push({ type: "text", text: "" });
+              }
               getLastTextBlock(msg).text += (block.text as string) || "";
             } else if (block.type === "tool_use") {
               const tc: ToolCall = {
@@ -338,7 +372,13 @@ export function processClaudeEvent(
     case "content_block_start": {
       const msg = getAssistantMessage();
       const block = event.content_block as Record<string, unknown> | undefined;
-      if (block?.type === "tool_use") {
+      if (block?.type === "thinking") {
+        // Thinking block starting — ensure a fresh thinking block
+        const lastContent = msg.content[msg.content.length - 1];
+        if (lastContent && lastContent.type === "thinking" && lastContent.text) {
+          msg.content.push({ type: "thinking", text: "" });
+        }
+      } else if (block?.type === "tool_use") {
         // New tool starting → mark any previous pending tools as complete
         markPendingToolsComplete(msg);
         const tc: ToolCall = {
@@ -352,6 +392,12 @@ export function processClaudeEvent(
       } else if (block?.type === "text") {
         // Text block starting → any pending tool calls are done
         markPendingToolsComplete(msg);
+        // If the previous content is already a text block with content,
+        // start a fresh block so consecutive text blocks don't merge without spacing
+        const lastContent = msg.content[msg.content.length - 1];
+        if (lastContent && lastContent.type === "text" && lastContent.text) {
+          msg.content.push({ type: "text", text: "" });
+        }
       }
       return MODIFIED;
     }
@@ -359,7 +405,9 @@ export function processClaudeEvent(
     case "content_block_delta": {
       const msg = getAssistantMessage();
       const delta = event.delta as Record<string, unknown> | undefined;
-      if (delta?.type === "text_delta") {
+      if (delta?.type === "thinking_delta") {
+        getLastThinkingBlock(msg).text += (delta.thinking as string) || "";
+      } else if (delta?.type === "text_delta") {
         // Text arriving after a tool_use → tool is done
         const lastTc = getLastToolCall(msg);
         if (lastTc && !lastTc.isComplete) {
@@ -413,17 +461,23 @@ export function processClaudeEvent(
     case "result": {
       const subtype = event.subtype as string | undefined;
 
+      // Always extract usage and session_id from any result event
+      const sessionId = event.session_id as string | undefined;
+      const usage = extractUsage(event);
+      const contextTokens = usage?.inputTokens;
+
       // Tool result disguised as "result" event — match broadly
       if (
         subtype === "tool_result" ||
         subtype === "tool_use_result" ||
         event.tool_use_id
       ) {
-        return handleToolResult(
+        handleToolResult(
           event.tool_use_id as string,
           event.content ?? event.output,
           event.is_error as boolean | undefined,
         );
+        return { modified: true, sessionId, usage, contextTokens };
       }
 
       // Final completion — turn is over, all agents must be done
@@ -453,11 +507,7 @@ export function processClaudeEvent(
           }
         }
       }
-      // Extract session_id and usage for conversation continuation
-      const sessionId = event.session_id as string | undefined;
-      const usage = extractUsage(event);
-      const contextTokens = usage?.inputTokens;
-      return { modified: true, sessionId, usage, contextTokens };
+      return { modified: true, sessionId, usage, contextTokens, turnComplete: true };
     }
 
     // Error
@@ -478,6 +528,18 @@ export function processClaudeEvent(
       const msg = getAssistantMessage();
       getLastTextBlock(msg).text += (event.text as string) || "";
       return MODIFIED;
+    }
+
+    // Permission request — the CLI is waiting for approval on stdin
+    case "permission_request":
+    case "tool_use_permission": {
+      const toolName = (event.tool_name as string) || (event.tool as string) || "unknown";
+      const toolInput = (event.input as Record<string, unknown>) || (event.tool_input as Record<string, unknown>) || {};
+      const description = (event.description as string) || (event.message as string) || undefined;
+      return {
+        modified: true,
+        permissionRequest: { toolName, toolInput, description },
+      };
     }
 
     default:

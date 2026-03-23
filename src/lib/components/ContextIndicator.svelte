@@ -1,16 +1,11 @@
 <script lang="ts">
   /** Context Window Indicator — glowing arc that shows how full the context is */
+  import { MODEL_CONTEXT_LIMITS } from "../types";
   import type { ClaudeModel } from "../types";
-
-  const CONTEXT_LIMITS: Record<ClaudeModel, number> = {
-    opus: 1_000_000,
-    sonnet: 200_000,
-    haiku: 200_000,
-  };
 
   let { tokens = 0, model = "opus" as ClaudeModel }: { tokens: number; model?: ClaudeModel } = $props();
 
-  let maxContext = $derived(CONTEXT_LIMITS[model] || 200_000);
+  let maxContext = $derived(MODEL_CONTEXT_LIMITS[model] || 200_000);
   let fill = $derived(Math.min(tokens / maxContext, 1));
   let pct = $derived(Math.round(fill * 100));
 

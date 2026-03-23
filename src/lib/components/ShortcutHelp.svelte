@@ -33,6 +33,7 @@
     { keys: "Enter", desc: "Prompt senden" },
     { keys: "Shift + Enter", desc: "Zeilenumbruch" },
     { keys: "Ctrl + L", desc: "Chat leeren" },
+    { keys: "Ctrl + F", desc: "Suche in Conversation" },
     { section: "panels" },
     { keys: "Ctrl + B", desc: "Dateibaum ein/ausblenden" },
     { keys: "Ctrl + /", desc: "Shortcuts anzeigen" },

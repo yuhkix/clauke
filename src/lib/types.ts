@@ -25,9 +25,10 @@ export interface ToolCall {
   children?: ToolCall[];
 }
 
-/** A content block — text, image, or a tool call, rendered in order */
+/** A content block — text, image, thinking, or a tool call, rendered in order */
 export type ContentBlock =
   | { type: "text"; text: string }
+  | { type: "thinking"; text: string }
   | { type: "image"; path: string }
   | { type: "tool_call"; toolCall: ToolCall };
 
@@ -74,6 +75,13 @@ export const MODEL_LABELS: Record<ClaudeModel, string> = {
   sonnet: "Sonnet",
   opus: "Opus",
   haiku: "Haiku",
+};
+
+/** Context window limits per model (in tokens) — all current Claude models use 200k */
+export const MODEL_CONTEXT_LIMITS: Record<ClaudeModel, number> = {
+  opus: 200_000,
+  sonnet: 200_000,
+  haiku: 200_000,
 };
 
 export const EFFORT_LABELS: Record<EffortLevel, string> = {
@@ -124,6 +132,8 @@ export interface Tab {
   /** Last input token count — approximates current context window fill level */
   contextTokens?: number;
   permissionMode: PermissionMode;
+  /** Per-tab system prompt (overrides global default when set) */
+  systemPrompt?: string;
 }
 
 /** A single task from Claude's TodoWrite tool */

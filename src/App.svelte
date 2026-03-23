@@ -16,15 +16,29 @@
   import ContextIndicator from "./lib/components/ContextIndicator.svelte";
   import FileTree from "./lib/components/FileTree.svelte";
   import ShortcutHelp from "./lib/components/ShortcutHelp.svelte";
+  import SearchOverlay from "./lib/components/SearchOverlay.svelte";
   import type { ChatMessage, ClaudeEvent, Tab, SlashCommand, ToolCall, SessionRecord, TokenUsage, PermissionMode, TodoItem } from "./lib/types";
-  import { BUILTIN_COMMANDS, MAX_SESSION_HISTORY, emptyUsage, addUsage, formatTokens, PERMISSION_TOOL_SETS, extractTodos, extractFileStats, buildFileTree } from "./lib/types";
-  import { processClaudeEvent } from "./lib/claude";
+  import { BUILTIN_COMMANDS, MAX_SESSION_HISTORY, emptyUsage, addUsage, formatTokens, PERMISSION_TOOL_SETS, extractTodos, extractFileStats, buildFileTree, MODEL_CONTEXT_LIMITS } from "./lib/types";
+  import { processClaudeEvent, cleanupTabState } from "./lib/claude";
 
   let settingsOpen = $state(false);
   let agentPanelOpen = $state(false);
   let sessionManagerOpen = $state(false);
   let fileTreeOpen = $state(false);
   let shortcutHelpOpen = $state(false);
+  let sysPromptOpen = $state(false);
+  let searchOpen = $state(false);
+
+  /** Steering is always available — prompts go via stdin stream-json */
+  const canSteer = true;
+
+  /** Active permission request waiting for user decision */
+  let permissionRequest = $state<{
+    tabId: string;
+    toolName: string;
+    toolInput: Record<string, unknown>;
+    description?: string;
+  } | null>(null);
   let allCommands = $state<SlashCommand[]>(BUILTIN_COMMANDS);
   let autoScrollEnabled = $state(
     localStorage.getItem("clauke:autoScroll") !== "false",
@@ -73,15 +87,13 @@
       model: (localStorage.getItem("clauke:defaultModel") as import("./lib/types").ClaudeModel) || "opus",
       effort: (localStorage.getItem("clauke:defaultEffort") as import("./lib/types").EffortLevel) || "max",
       permissionMode: (localStorage.getItem("clauke:permissionMode") as PermissionMode) || "bypass",
+      systemPrompt: localStorage.getItem("clauke:systemPrompt") || "",
     };
   }
 
-  /** Restore tabs from localStorage, or create a fresh tab */
-  function restoreTabs(): { tabs: Tab[]; activeId: string } {
-    try {
-      const raw = localStorage.getItem("clauke:session");
-      if (!raw) throw new Error("no session");
-      const data = JSON.parse(raw);
+  /** Parse raw session JSON into tabs. Throws on invalid data. */
+  function parseSessionData(raw: string): { tabs: Tab[]; activeId: string } {
+    const data = JSON.parse(raw);
       if (!Array.isArray(data.tabs) || data.tabs.length === 0) throw new Error("empty");
       const restored: Tab[] = data.tabs.map((t: any) => {
         // Bump counter so new tabs get higher numbers
@@ -98,50 +110,68 @@
           sessionId: t.sessionId,
           permissionMode: t.permissionMode || "bypass",
           contextTokens: t.contextTokens || undefined,
+          systemPrompt: t.systemPrompt || "",
         } as Tab;
       });
-      const activeId = data.activeTabId && restored.some((t: Tab) => t.id === data.activeTabId)
-        ? data.activeTabId
-        : restored[0].id;
-      return { tabs: restored, activeId };
+    const activeId = data.activeTabId && restored.some((t: Tab) => t.id === data.activeTabId)
+      ? data.activeTabId
+      : restored[0].id;
+    return { tabs: restored, activeId };
+  }
+
+  /** Restore tabs from filesystem or localStorage, or create a fresh tab */
+  function restoreTabs(): { tabs: Tab[]; activeId: string } {
+    // Synchronous restore from localStorage (filesystem restore happens async in onMount)
+    try {
+      const raw = localStorage.getItem("clauke:session");
+      if (!raw) throw new Error("no session");
+      return parseSessionData(raw);
     } catch {
       const first = createTab();
       return { tabs: [first], activeId: first.id };
     }
   }
 
-  /** Save current tabs to localStorage (debounced via caller) */
+  /** Truncate messages for storage */
+  function truncateForStorage(messages: ChatMessage[]) {
+    return messages.map((m) => ({
+      ...m,
+      content: m.content.map((b) => {
+        if (b.type === "tool_call" && b.toolCall.result && b.toolCall.result.length > 800) {
+          return { ...b, toolCall: { ...b.toolCall, result: b.toolCall.result.slice(0, 800) + "\n…(truncated)" } };
+        }
+        if (b.type === "thinking" && b.text.length > 500) {
+          return { ...b, text: b.text.slice(0, 500) + "\n…(truncated)" };
+        }
+        return b;
+      }),
+    }));
+  }
+
+  /** Save current tabs to filesystem (debounced via caller) */
   function persistSession() {
-    try {
-      // Truncate large tool results to keep storage manageable
-      const serializable = tabs.map((t) => ({
-        id: t.id,
-        name: t.name,
-        cwd: t.cwd,
-        model: t.model,
-        effort: t.effort,
-        permissionMode: t.permissionMode,
-        sessionId: t.sessionId,
-        contextTokens: t.contextTokens,
-        messages: t.messages.map((m) => ({
-          ...m,
-          content: m.content.map((b) => {
-            if (b.type === "tool_call" && b.toolCall.result && b.toolCall.result.length > 800) {
-              return { ...b, toolCall: { ...b.toolCall, result: b.toolCall.result.slice(0, 800) + "\n…(truncated)" } };
-            }
-            return b;
-          }),
-        })),
-      }));
-      localStorage.setItem("clauke:session", JSON.stringify({ tabs: serializable, activeTabId }));
-    } catch {
-      // Quota exceeded — silently skip
-    }
+    const serializable = tabs.map((t) => ({
+      id: t.id,
+      name: t.name,
+      cwd: t.cwd,
+      model: t.model,
+      effort: t.effort,
+      permissionMode: t.permissionMode,
+      sessionId: t.sessionId,
+      contextTokens: t.contextTokens,
+      systemPrompt: t.systemPrompt,
+      messages: truncateForStorage(t.messages),
+    }));
+    const data = JSON.stringify({ tabs: serializable, activeTabId });
+    // Always keep localStorage in sync (sync restore reads it on next launch)
+    try { localStorage.setItem("clauke:session", data); } catch { /* quota exceeded */ }
+    invoke("storage_write", { key: "session", value: data }).catch(() => {});
   }
 
   // ── Session History (archived sessions) ──
 
   function loadSessionHistory(): SessionRecord[] {
+    // Synchronous load from localStorage; async filesystem load in onMount
     try {
       const raw = localStorage.getItem("clauke:sessionHistory");
       if (!raw) return [];
@@ -152,12 +182,27 @@
     }
   }
 
-  function saveSessionHistory() {
+  /** Async load from filesystem — called in onMount */
+  async function loadSessionHistoryFromFs() {
     try {
-      localStorage.setItem("clauke:sessionHistory", JSON.stringify(sessionHistory));
-    } catch {
-      // Quota exceeded
-    }
+      const raw = await invoke<string | null>("storage_read", { key: "sessionHistory" });
+      if (raw) {
+        const data = JSON.parse(raw);
+        if (Array.isArray(data) && data.length > 0) {
+          sessionHistory = data;
+        }
+      } else if (sessionHistory.length > 0) {
+        // Migrate localStorage history to filesystem
+        saveSessionHistory();
+      }
+    } catch { /* keep localStorage data */ }
+  }
+
+  function saveSessionHistory() {
+    const data = JSON.stringify(sessionHistory);
+    invoke("storage_write", { key: "sessionHistory", value: data }).catch(() => {
+      try { localStorage.setItem("clauke:sessionHistory", data); } catch { /* quota exceeded */ }
+    });
   }
 
   /** Archive a tab to session history (only if it has a sessionId and messages) */
@@ -176,16 +221,7 @@
           .slice(0, 120)
       : "";
 
-    // Truncate tool results for storage
-    const storedMessages = tab.messages.map((m) => ({
-      ...m,
-      content: m.content.map((b) => {
-        if (b.type === "tool_call" && b.toolCall.result && b.toolCall.result.length > 800) {
-          return { ...b, toolCall: { ...b.toolCall, result: b.toolCall.result.slice(0, 800) + "\n…(truncated)" } };
-        }
-        return b;
-      }),
-    }));
+    const storedMessages = truncateForStorage(tab.messages);
 
     const record: SessionRecord = {
       id: existingIdx >= 0 ? sessionHistory[existingIdx].id : `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -233,7 +269,7 @@
       sessionId: session.sessionId,
       permissionMode: (localStorage.getItem("clauke:permissionMode") as PermissionMode) || "bypass",
     };
-    tabs = [...tabs, newTab];
+    tabs.push(newTab);
     activeTabId = newTab.id;
     sessionManagerOpen = false;
   }
@@ -288,11 +324,40 @@
     // Load custom commands on startup
     loadSlashCommands(activeTab.cwd || undefined);
 
+    // Safety net: persist session on app close so debounced saves aren't lost
+    const handleBeforeUnload = () => persistSession();
+    window.addEventListener("beforeunload", handleBeforeUnload);
+
+    // Try to restore from filesystem (async — upgrades from localStorage)
+    invoke<string | null>("storage_read", { key: "session" }).then((raw) => {
+      if (raw) {
+        try {
+          const restored = parseSessionData(raw);
+          // Only apply if we haven't started any new work yet
+          if (tabs.length === 1 && tabs[0].messages.length === 0) {
+            tabs.splice(0, tabs.length, ...restored.tabs);
+            activeTabId = restored.activeId;
+          }
+        } catch { /* keep current tabs */ }
+      } else {
+        // No filesystem data yet — persist current localStorage data to filesystem
+        persistSession();
+      }
+    }).catch(() => {});
+
+    // Load session history from filesystem
+    loadSessionHistoryFromFs();
+
     const unlistenEvent = listen<ClaudeEvent>("claude-event", (e) => {
       const tabId = e.payload.tab_id;
       if (!tabId) return;
       const tab = findTab(tabId);
       if (!tab) return;
+      // Handle session expired — clear stale sessionId before processing
+      if ((e.payload as any).subtype === "session_expired") {
+        tab.sessionId = undefined;
+        return;
+      }
       const result = processClaudeEvent(e.payload, tab.messages, tabId as string);
       // Capture session_id for conversation continuation
       if (result.sessionId) {
@@ -302,11 +367,17 @@
       if (result.usage) {
         tab.usage = addUsage(tab.usage || emptyUsage(), result.usage);
       }
-      // Explicit compact event from CLI — keep the current contextTokens
-      // (the next result event will update it with actual post-compaction size).
-      // Track context window fill (input + cache = actual context size)
+      // Track context window fill.
+      // The CLI's result event reports cumulative usage across all API calls
+      // in the agentic loop (e.g. 5 tool calls × 150k = 750k+), not the
+      // current context window fill of a single call. Cap at the model's
+      // actual context limit so the indicator stays meaningful.
       if (result.usage) {
-        const ctx = result.usage.inputTokens + result.usage.cacheReadTokens + result.usage.cacheCreationTokens;
+        const maxCtx = MODEL_CONTEXT_LIMITS[tab.model] || 200_000;
+        const ctx = Math.min(
+          result.usage.inputTokens + result.usage.cacheReadTokens + result.usage.cacheCreationTokens,
+          maxCtx,
+        );
         if (ctx > 0) {
           // Heuristic compaction detection: context dropped by >30%
           // Skip if the CLI already told us about it (compacted flag).
@@ -321,8 +392,19 @@
           tab.contextTokens = ctx;
         }
       }
-      // Trigger reactivity
-      tabs = [...tabs];
+      // Handle permission requests
+      if (result.permissionRequest) {
+        permissionRequest = {
+          tabId: tabId as string,
+          ...result.permissionRequest,
+        };
+      }
+      // Turn complete — stop the loading animation.
+      // The CLI process stays alive (for steering), but Claude is done generating.
+      if (result.turnComplete) {
+        tab.isRunning = false;
+        persistSession();
+      }
     });
 
     const unlistenDone = listen<string>("claude-done", (e) => {
@@ -330,11 +412,13 @@
       const tab = findTab(tabId);
       if (tab) {
         tab.isRunning = false;
-        tabs = [...tabs];
       }
     });
 
     return () => {
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+      // Final save before teardown — the debounced $effect cleanup cancels pending saves
+      persistSession();
       unlistenEvent.then((fn) => fn());
       unlistenDone.then((fn) => fn());
     };
@@ -352,15 +436,12 @@
       content.push({ type: "text", text: prompt });
     }
 
-    tab.messages = [
-      ...tab.messages,
-      {
-        id: `user-${Date.now()}`,
-        role: "user",
-        content,
-        timestamp: Date.now(),
-      },
-    ];
+    tab.messages.push({
+      id: `user-${Date.now()}`,
+      role: "user",
+      content,
+      timestamp: Date.now(),
+    });
     tab.isRunning = true;
 
     // Name tab after first prompt — set a quick label, then auto-title in background
@@ -376,14 +457,11 @@
             const t = findTab(tabId);
             if (t) {
               t.name = title;
-              tabs = [...tabs];
             }
           })
           .catch(() => {}); // Silently keep the manual label
       }
     }
-
-    tabs = [...tabs];
 
     try {
       const mode = tab.permissionMode;
@@ -393,7 +471,7 @@
         allowedTools = PERMISSION_TOOL_SETS[mode];
       }
       // For plan mode: prepend a plan-first instruction to the system prompt
-      let sysPrompt = localStorage.getItem("clauke:systemPrompt") || "";
+      let sysPrompt = tab.systemPrompt || "";
       if (mode === "plan") {
         const planPrefix = "You are in PLAN MODE. Before making any file changes, first analyze the codebase and create a detailed step-by-step plan. Present the plan clearly and wait for the user to approve it before proceeding with implementation. Only use read-only tools (Read, Glob, Grep, WebFetch, WebSearch) until the user explicitly approves your plan.";
         sysPrompt = sysPrompt ? `${planPrefix}\n\n${sysPrompt}` : planPrefix;
@@ -414,16 +492,12 @@
       });
     } catch (err) {
       tab.isRunning = false;
-      tab.messages = [
-        ...tab.messages,
-        {
-          id: `err-${Date.now()}`,
-          role: "assistant",
-          content: [{ type: "text", text: `**Error:** ${err}` }],
-          timestamp: Date.now(),
-        },
-      ];
-      tabs = [...tabs];
+      tab.messages.push({
+        id: `err-${Date.now()}`,
+        role: "assistant",
+        content: [{ type: "text", text: `**Error:** ${err}` }],
+        timestamp: Date.now(),
+      });
     }
   }
 
@@ -432,19 +506,17 @@
     if (!tab.isRunning || !message.trim()) return;
 
     // Add as user message in chat
-    tab.messages = [
-      ...tab.messages,
-      {
-        id: `steer-${Date.now()}`,
-        role: "user",
-        content: [{ type: "text", text: message }],
-        timestamp: Date.now(),
-      },
-    ];
-    tabs = [...tabs];
+    tab.messages.push({
+      id: `steer-${Date.now()}`,
+      role: "user",
+      content: [{ type: "text", text: message }],
+      timestamp: Date.now(),
+    });
 
     try {
       await invoke("steer_claude", { tabId: tab.id, message });
+      // Steering sent — Claude will start generating again
+      tab.isRunning = true;
     } catch (err) {
       console.warn("Steering failed:", err);
     }
@@ -480,7 +552,7 @@
 
   function handleNewTab() {
     const newTab = createTab();
-    tabs = [...tabs, newTab];
+    tabs.push(newTab);
     activeTabId = newTab.id;
   }
 
@@ -491,23 +563,34 @@
     }
     // Archive the tab before closing
     if (tab) archiveTab(tab);
+    // Clean up internal parser state for this tab
+    cleanupTabState(id);
     const idx = tabs.findIndex((t) => t.id === id);
     if (tabs.length <= 1) return;
-    tabs = tabs.filter((t) => t.id !== id);
+    tabs.splice(idx, 1);
     if (activeTabId === id) {
       activeTabId = tabs[Math.min(idx, tabs.length - 1)].id;
     }
+    // Save immediately — don't rely on the debounced $effect which gets
+    // cancelled on component destroy (app close), causing zombie tabs.
+    persistSession();
   }
 
   function handleSelectTab(id: string) {
     activeTabId = id;
   }
 
+  function handleRenameTab(id: string, name: string) {
+    const tab = findTab(id);
+    if (tab) {
+      tab.name = name;
+    }
+  }
+
   async function browseFolder() {
     const selected = await open({ directory: true, multiple: false });
     if (selected) {
       activeTab.cwd = selected as string;
-      tabs = [...tabs];
       // Reload commands — project might have its own .claude/commands/
       loadSlashCommands(activeTab.cwd);
     }
@@ -534,6 +617,10 @@
       case "b":
         e.preventDefault();
         fileTreeOpen = !fileTreeOpen;
+        break;
+      case "f":
+        e.preventDefault();
+        searchOpen = !searchOpen;
         break;
       case "/":
         e.preventDefault();
@@ -585,10 +672,60 @@
       model: tab.model,
       effort: tab.effort,
       permissionMode: tab.permissionMode,
+      systemPrompt: tab.systemPrompt,
       // No sessionId — this is a fresh fork, can't resume the old session
     };
-    tabs = [...tabs, newTab];
+    tabs.push(newTab);
     activeTabId = newTab.id;
+  }
+
+  // ── Permission handling ──
+  async function handlePermissionResponse(allow: boolean) {
+    if (!permissionRequest) return;
+    const { tabId } = permissionRequest;
+    permissionRequest = null;
+    try {
+      await invoke("steer_claude", { tabId, message: allow ? "y" : "n" });
+    } catch (err) {
+      console.warn("Permission response failed:", err);
+    }
+  }
+
+  // ── Search navigation ──
+  function handleSearchNavigate(messageId: string) {
+    // Scroll the message into view
+    const el = document.getElementById(messageId);
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      // Brief highlight flash
+      el.classList.add("search-highlight");
+      setTimeout(() => el.classList.remove("search-highlight"), 1500);
+    }
+  }
+
+  // ── Edit & resend a user message ──
+  let pendingEdit = $state<{ text: string; messageId: string } | null>(null);
+
+  function handleEditMessage(messageId: string) {
+    const tab = activeTab;
+    if (tab.isRunning) return;
+    const msgIdx = tab.messages.findIndex((m) => m.id === messageId);
+    if (msgIdx < 0) return;
+    const msg = tab.messages[msgIdx];
+    if (msg.role !== "user") return;
+
+    // Extract text from the message
+    const text = msg.content
+      .filter((b) => b.type === "text")
+      .map((b) => (b as { type: "text"; text: string }).text)
+      .join("\n");
+
+    // Truncate messages: keep everything up to (not including) this message
+    tab.messages.splice(msgIdx);
+    // Clear session so we don't resume with orphaned context
+    tab.sessionId = undefined;
+    // Set the text for the InputBar to pick up
+    pendingEdit = { text, messageId };
   }
 
   // ── Copy full assistant message ──
@@ -677,6 +814,7 @@
     onSelect={handleSelectTab}
     onClose={handleCloseTab}
     onNew={handleNewTab}
+    onRename={handleRenameTab}
   />
 
   <div class="main-row">
@@ -686,8 +824,14 @@
       onToggle={() => (fileTreeOpen = !fileTreeOpen)}
     />
     <main class="chat-area">
+      <SearchOverlay
+        messages={activeTab.messages}
+        open={searchOpen}
+        onClose={() => (searchOpen = false)}
+        onNavigate={handleSearchNavigate}
+      />
       {#key activeTabId}
-        <ChatView messages={activeTab.messages} isRunning={activeTab.isRunning} {autoScrollEnabled} onFork={handleFork} onCopy={handleCopyMessage} />
+        <ChatView messages={activeTab.messages} isRunning={activeTab.isRunning} {autoScrollEnabled} onFork={handleFork} onCopy={handleCopyMessage} onEditMessage={handleEditMessage} />
       {/key}
     </main>
     <AgentPanel
@@ -699,16 +843,37 @@
 
   <footer class="input-area">
     <TodoPanel todos={activeTodos} />
+    {#if sysPromptOpen}
+      <div class="sys-prompt-bar">
+        <textarea
+          class="sys-prompt-input"
+          placeholder="system prompt for this tab..."
+          bind:value={activeTab.systemPrompt}
+          rows="2"
+        ></textarea>
+        <button class="sys-prompt-close" onclick={() => (sysPromptOpen = false)} title="Close">
+          <svg width="10" height="10" viewBox="0 0 10 10">
+            <line x1="2" y1="2" x2="8" y2="8" stroke="currentColor" stroke-width="1.2" />
+            <line x1="8" y1="2" x2="2" y2="8" stroke="currentColor" stroke-width="1.2" />
+          </svg>
+        </button>
+      </div>
+    {/if}
     <InputBar
       onSend={handleSend}
       onSteer={handleSteer}
       onStop={handleStop}
       onCommand={handleCommand}
       isRunning={activeTab.isRunning}
+      {canSteer}
       commands={allCommands}
       bind:model={activeTab.model}
       bind:effort={activeTab.effort}
       bind:permissionMode={activeTab.permissionMode}
+      hasSystemPrompt={!!activeTab.systemPrompt}
+      onToggleSystemPrompt={() => (sysPromptOpen = !sysPromptOpen)}
+      prefill={pendingEdit?.text || ""}
+      onPrefillConsumed={() => (pendingEdit = null)}
     />
     {#if activeTab.contextTokens && activeTab.contextTokens > 0}
       <ContextIndicator tokens={activeTab.contextTokens} model={activeTab.model} />
@@ -736,6 +901,27 @@
       </div>
     {/if}
   </footer>
+
+  <!-- Permission dialog -->
+  {#if permissionRequest && canSteer}
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="perm-overlay" onkeydown={(e) => e.key === "Escape" && handlePermissionResponse(false)}>
+      <div class="perm-dialog">
+        <div class="perm-title">permission required</div>
+        <div class="perm-tool">{permissionRequest.toolName}</div>
+        {#if permissionRequest.description}
+          <div class="perm-desc">{permissionRequest.description}</div>
+        {/if}
+        {#if Object.keys(permissionRequest.toolInput).length > 0}
+          <pre class="perm-input">{JSON.stringify(permissionRequest.toolInput, null, 2)}</pre>
+        {/if}
+        <div class="perm-actions">
+          <button class="perm-btn perm-deny" onclick={() => handlePermissionResponse(false)}>Deny</button>
+          <button class="perm-btn perm-allow" onclick={() => handlePermissionResponse(true)}>Allow</button>
+        </div>
+      </div>
+    </div>
+  {/if}
 
   <ShortcutHelp open={shortcutHelpOpen} onClose={() => (shortcutHelpOpen = false)} />
   <SettingsPanel open={settingsOpen} onClose={() => (settingsOpen = false)} onSettingsChange={handleSettingsChange} />
@@ -893,6 +1079,59 @@
     background: none;
   }
 
+  .sys-prompt-bar {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    max-width: 860px;
+    margin: 0 auto;
+    padding: 0 20px 6px;
+    animation: fadeIn 0.25s var(--ease-out-expo);
+  }
+
+  .sys-prompt-input {
+    flex: 1;
+    min-height: 32px;
+    max-height: 80px;
+    resize: none;
+    padding: 6px 10px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-secondary);
+    background: var(--bg-input);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    outline: none;
+    transition: border-color 0.2s ease;
+  }
+  .sys-prompt-input:focus {
+    border-color: var(--border-focus);
+    color: var(--text);
+  }
+  .sys-prompt-input::placeholder {
+    color: var(--text-tertiary);
+  }
+
+  .sys-prompt-close {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    margin-top: 5px;
+    border: none;
+    background: none;
+    color: var(--text-tertiary);
+    cursor: pointer;
+    border-radius: 4px;
+    transition: all 0.15s ease;
+    flex-shrink: 0;
+  }
+  .sys-prompt-close:hover {
+    color: var(--text-secondary);
+    background: rgba(255, 255, 255, 0.06);
+  }
+
   .token-bar {
     display: flex;
     justify-content: center;
@@ -977,5 +1216,112 @@
   .wc-close:hover {
     color: #fff;
     background: rgba(220, 60, 60, 0.8);
+  }
+
+  /* ── Permission dialog ── */
+  .perm-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 200;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.4);
+    animation: overlayIn 0.2s var(--ease-out-expo);
+  }
+
+  @keyframes overlayIn {
+    from { background: rgba(0, 0, 0, 0); }
+    to { background: rgba(0, 0, 0, 0.4); }
+  }
+
+  .perm-dialog {
+    width: 380px;
+    max-width: 90vw;
+    background: rgba(30, 30, 34, 0.85);
+    backdrop-filter: blur(48px) saturate(1.4);
+    -webkit-backdrop-filter: blur(48px) saturate(1.4);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: var(--radius-md);
+    padding: 20px;
+    box-shadow: 0 16px 64px rgba(0, 0, 0, 0.5);
+    animation: scaleIn 0.25s var(--ease-out-expo);
+  }
+
+  .perm-title {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: rgba(251, 191, 36, 0.7);
+    margin-bottom: 12px;
+  }
+
+  .perm-tool {
+    font-family: var(--font-mono);
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text);
+    margin-bottom: 8px;
+  }
+
+  .perm-desc {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-bottom: 8px;
+    line-height: 1.5;
+  }
+
+  .perm-input {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    line-height: 1.4;
+    color: var(--text-secondary);
+    background: rgba(0, 0, 0, 0.2);
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    padding: 8px 10px;
+    max-height: 150px;
+    overflow: auto;
+    margin-bottom: 16px;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+
+  .perm-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+  }
+
+  .perm-btn {
+    padding: 6px 18px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 500;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .perm-deny {
+    color: var(--text-secondary);
+    background: rgba(255, 255, 255, 0.04);
+  }
+  .perm-deny:hover {
+    color: var(--text);
+    background: rgba(255, 255, 255, 0.08);
+  }
+
+  .perm-allow {
+    color: rgba(130, 220, 160, 0.9);
+    background: rgba(130, 220, 160, 0.08);
+    border-color: rgba(130, 220, 160, 0.2);
+  }
+  .perm-allow:hover {
+    background: rgba(130, 220, 160, 0.15);
+    border-color: rgba(130, 220, 160, 0.3);
   }
 </style>

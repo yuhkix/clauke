@@ -487,13 +487,22 @@ async fn remove_hook(event: String, index: usize) -> Result<(), String> {
 /// Uses claude CLI with haiku for speed.
 #[tauri::command]
 async fn generate_title(prompt: String) -> Result<String, String> {
-    let output = tokio::process::Command::new("claude")
-        .args([
-            "-p",
-            &format!("Generate a very short title (max 5 words, no quotes, no punctuation at end) for a conversation that starts with this prompt: {}", prompt),
-            "--output-format", "text",
-            "--model", "haiku",
-        ])
+    let mut cmd = tokio::process::Command::new("claude");
+    cmd.args([
+        "-p",
+        &format!("Generate a very short title (max 5 words, no quotes, no punctuation at end) for a conversation that starts with this prompt: {}", prompt),
+        "--output-format", "text",
+        "--model", "haiku",
+    ]);
+
+    // Prevent a console window from flashing on Windows
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let output = cmd
         .output()
         .await
         .map_err(|e| format!("Failed to spawn claude: {}", e))?;
@@ -512,6 +521,60 @@ async fn generate_title(prompt: String) -> Result<String, String> {
     Ok(title)
 }
 
+// ── Persistent storage (replaces localStorage) ──
+
+/// Get the clauke data directory (~/.clauke/ or AppData/clauke/)
+fn data_dir() -> Result<std::path::PathBuf, String> {
+    let base = dirs::data_local_dir()
+        .or_else(dirs::data_dir)
+        .ok_or("Could not find data directory")?;
+    Ok(base.join("clauke"))
+}
+
+/// Read a JSON file from the clauke data directory.
+#[tauri::command]
+async fn storage_read(key: String) -> Result<Option<String>, String> {
+    let path = data_dir()?.join(format!("{}.json", key));
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = tokio::fs::read_to_string(&path)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(Some(content))
+}
+
+/// Write a JSON string to a file in the clauke data directory.
+#[tauri::command]
+async fn storage_write(key: String, value: String) -> Result<(), String> {
+    let dir = data_dir()?;
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(|e| e.to_string())?;
+    let path = dir.join(format!("{}.json", key));
+    tokio::fs::write(&path, value.as_bytes())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Delete a file from the clauke data directory.
+#[tauri::command]
+async fn storage_delete(key: String) -> Result<(), String> {
+    let path = data_dir()?.join(format!("{}.json", key));
+    if path.exists() {
+        tokio::fs::remove_file(&path)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Return the CLI interaction mode so the frontend knows whether steering is available.
+#[tauri::command]
+async fn get_cli_mode() -> String {
+    "interactive".to_string()
+}
+
 pub fn run() {
     // Default cleanup: 7 days. The frontend can call cleanup_clipboard with the user's setting.
     cleanup_old_images(7);
@@ -521,7 +584,7 @@ pub fn run() {
         .manage(AppState {
             tabs: Arc::new(Mutex::new(HashMap::new())),
         })
-        .invoke_handler(tauri::generate_handler![send_prompt, stop_claude, steer_claude, save_clipboard_image, list_slash_commands, cleanup_clipboard, generate_title, list_mcp_servers, add_mcp_server, remove_mcp_server, list_hooks, add_hook, remove_hook])
+        .invoke_handler(tauri::generate_handler![send_prompt, stop_claude, steer_claude, save_clipboard_image, list_slash_commands, cleanup_clipboard, generate_title, list_mcp_servers, add_mcp_server, remove_mcp_server, list_hooks, add_hook, remove_hook, storage_read, storage_write, storage_delete, get_cli_mode])
         .run(tauri::generate_context!())
         .expect("error while running clauke");
 }

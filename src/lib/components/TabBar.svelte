@@ -7,13 +7,44 @@
     onSelect,
     onClose,
     onNew,
+    onRename,
   }: {
     tabs: Tab[];
     activeTabId: string;
     onSelect: (id: string) => void;
     onClose: (id: string) => void;
     onNew: () => void;
+    onRename?: (id: string, name: string) => void;
   } = $props();
+
+  let editingTabId = $state<string | null>(null);
+  let editValue = $state("");
+  let editInput = $state<HTMLInputElement>();
+
+  function startRename(tab: Tab) {
+    editingTabId = tab.id;
+    editValue = tab.name;
+    requestAnimationFrame(() => {
+      editInput?.select();
+    });
+  }
+
+  function commitRename() {
+    if (editingTabId && editValue.trim() && onRename) {
+      onRename(editingTabId, editValue.trim());
+    }
+    editingTabId = null;
+  }
+
+  function handleEditKeydown(e: KeyboardEvent) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      commitRename();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      editingTabId = null;
+    }
+  }
 </script>
 
 <div class="tab-bar">
@@ -26,10 +57,22 @@
         role="tab"
         tabindex="0"
         onclick={() => onSelect(tab.id)}
+        ondblclick={(e: MouseEvent) => { e.preventDefault(); startRename(tab); }}
         onkeydown={(e: KeyboardEvent) => e.key === "Enter" && onSelect(tab.id)}
         title={tab.cwd || tab.name}
       >
-        <span class="tab-name">{tab.name}</span>
+        {#if editingTabId === tab.id}
+          <input
+            bind:this={editInput}
+            class="tab-edit"
+            bind:value={editValue}
+            onblur={commitRename}
+            onkeydown={handleEditKeydown}
+            onclick={(e: MouseEvent) => e.stopPropagation()}
+          />
+        {:else}
+          <span class="tab-name">{tab.name}</span>
+        {/if}
         {#if tab.isRunning}
           <span class="tab-indicator"></span>
         {/if}
@@ -112,6 +155,19 @@
     max-width: 140px;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  .tab-edit {
+    width: 120px;
+    padding: 1px 4px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 400;
+    color: var(--text);
+    background: var(--bg-input);
+    border: 1px solid var(--border-focus);
+    border-radius: 3px;
+    outline: none;
   }
 
   .tab-indicator {

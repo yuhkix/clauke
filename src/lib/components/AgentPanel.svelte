@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { ToolCall } from "../types";
   import { getToolIcon } from "../types";
+  import { tick } from "svelte";
 
   let {
     agents,
@@ -13,6 +14,26 @@
   } = $props();
 
   let expandedId = $state<string | null>(null);
+  let expandedChildId = $state<string | null>(null);
+  let childrenListEl: HTMLDivElement | undefined = $state();
+
+  // Auto-scroll children list to bottom when new children arrive
+  $effect(() => {
+    if (!expandedId) return;
+    const agent = agents.find(a => a.id === expandedId);
+    const _childCount = agent?.children?.length ?? 0;
+    if (childrenListEl) {
+      tick().then(() => {
+        if (childrenListEl) childrenListEl.scrollTop = childrenListEl.scrollHeight;
+      });
+    }
+  });
+
+  // Reset expanded child when switching agent cards
+  $effect(() => {
+    void expandedId;
+    expandedChildId = null;
+  });
 
   // Live clock for elapsed timers — ticks every 100ms
   let now = $state(Date.now());
@@ -74,6 +95,17 @@
       if (!agent.children[i].isComplete) return agent.children[i];
     }
     return undefined;
+  }
+
+  /** Full path/command for hover title tooltip */
+  function childFullPath(tc: ToolCall): string {
+    const i = tc.input;
+    if (i.file_path) return String(i.file_path);
+    if (i.command) return String(i.command);
+    if (i.pattern) return String(i.pattern);
+    if (i.query) return String(i.query);
+    if (i.url) return String(i.url);
+    return tc.name;
   }
 
   let activeAgents = $derived(agents.filter((a) => !a.isComplete));
@@ -144,14 +176,20 @@
             </div>
           </button>
 
-          <!-- Live activity: show current child tool when agent is running (collapsed) -->
-          {#if !agent.isComplete && !isExpanded && agent.children?.length}
-            {@const current = activeChild(agent)}
-            {#if current}
-              <div class="agent-activity">
-                <span class="activity-icon">{getToolIcon(current.name)}</span>
-                <span class="activity-tool">{current.name}</span>
-                <span class="activity-detail">{childSummary(current)}</span>
+          <!-- Activity bar: live tool when running, "DONE!" when finished (collapsed only) -->
+          {#if !isExpanded}
+            {#if !agent.isComplete && agent.children?.length}
+              {@const current = activeChild(agent)}
+              {#if current}
+                <div class="agent-activity">
+                  <span class="activity-icon">{getToolIcon(current.name)}</span>
+                  <span class="activity-tool">{current.name}</span>
+                  <span class="activity-detail">{childSummary(current)}</span>
+                </div>
+              {/if}
+            {:else if agent.isComplete}
+              <div class="agent-activity done-activity">
+                <span class="activity-done-label">DONE!</span>
               </div>
             {/if}
           {/if}
@@ -162,9 +200,19 @@
               {#if agent.children?.length}
                 <div class="agent-section">
                   <span class="section-label">activity ({agent.children.length})</span>
-                  <div class="children-list">
+                  <div class="children-list" bind:this={childrenListEl}>
                     {#each agent.children as child (child.id)}
-                      <div class="child-row" class:child-done={child.isComplete} class:child-error={child.isError}>
+                      <div
+                        class="child-row"
+                        class:child-done={child.isComplete}
+                        class:child-error={child.isError}
+                        class:child-expanded={expandedChildId === child.id}
+                        role="button"
+                        tabindex="0"
+                        onclick={() => expandedChildId = expandedChildId === child.id ? null : child.id}
+                        onkeydown={(e) => e.key === "Enter" && (expandedChildId = expandedChildId === child.id ? null : child.id)}
+                        title={childFullPath(child)}
+                      >
                         <span class="child-status">
                           {#if !child.isComplete}
                             <span class="child-pulse"></span>
@@ -179,6 +227,19 @@
                         <span class="child-detail">{childSummary(child)}</span>
                         <span class="child-dur">{formatDuration(child)}</span>
                       </div>
+                      {#if expandedChildId === child.id}
+                        <div class="child-body">
+                          {#if Object.keys(child.input).length > 0}
+                            <pre class="child-block">{JSON.stringify(child.input, null, 2)}</pre>
+                          {/if}
+                          {#if child.result}
+                            {@const r = truncateResult(child.result, 20)}
+                            <pre class="child-block child-result-text">{r.text}{#if r.truncated}<span class="child-fade-out"></span>{/if}</pre>
+                          {:else if child.isComplete}
+                            <span class="child-no-output">no output</span>
+                          {/if}
+                        </div>
+                      {/if}
                     {/each}
                   </div>
                 </div>
@@ -418,11 +479,13 @@
   }
 
   .agent-card.done {
-    opacity: 0.6;
+    opacity: 0.5;
+    filter: saturate(0.15);
   }
 
   .agent-card.done:hover {
-    opacity: 0.85;
+    opacity: 0.7;
+    filter: saturate(0.3);
   }
 
   .agent-info {
@@ -582,6 +645,18 @@
     min-width: 0;
   }
 
+  .done-activity {
+    opacity: 0.6;
+  }
+
+  .activity-done-label {
+    font-family: var(--font-mono);
+    font-size: 9px;
+    font-weight: 600;
+    color: var(--text-tertiary);
+    letter-spacing: 0.5px;
+  }
+
   /* ── Children list (expanded) ── */
   .children-list {
     display: flex;
@@ -601,7 +676,17 @@
     align-items: center;
     gap: 5px;
     padding: 3px 8px;
-    transition: opacity 0.15s ease;
+    transition: opacity 0.15s ease, background 0.15s ease;
+    cursor: pointer;
+    border-radius: 4px;
+  }
+
+  .child-row:hover {
+    background: rgba(255, 255, 255, 0.04);
+  }
+
+  .child-row.child-expanded {
+    background: rgba(255, 255, 255, 0.05);
   }
 
   .child-row.child-done {
@@ -680,6 +765,56 @@
     flex-shrink: 0;
   }
 
+  /* ── Child expanded body ── */
+  .child-body {
+    padding: 4px 8px 6px 20px;
+    animation: bodyIn 0.2s var(--ease-out-expo);
+  }
+
+  .child-block {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    line-height: 1.45;
+    color: var(--text-secondary);
+    margin: 0;
+    padding: 5px 7px;
+    background: rgba(0, 0, 0, 0.25);
+    border-radius: 5px;
+    max-height: 160px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.06) transparent;
+    position: relative;
+  }
+
+  .child-block + .child-block {
+    margin-top: 3px;
+  }
+
+  .child-result-text {
+    color: var(--text-tertiary);
+    font-size: 9.5px;
+  }
+
+  .child-fade-out {
+    display: block;
+    height: 16px;
+    background: linear-gradient(to bottom, transparent, rgba(0, 0, 0, 0.25));
+    margin: 0 -7px -5px;
+    pointer-events: none;
+  }
+
+  .child-no-output {
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    color: var(--text-tertiary);
+    opacity: 0.4;
+    font-style: italic;
+    padding: 2px 0;
+  }
+
   :global([data-theme="light"]) .agent-panel {
     background: var(--bg-glass);
     box-shadow: 0 8px 40px rgba(0, 0, 0, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.5);
@@ -687,5 +822,13 @@
 
   :global([data-theme="light"]) .children-list {
     background: rgba(0, 0, 0, 0.04);
+  }
+
+  :global([data-theme="light"]) .child-block {
+    background: rgba(0, 0, 0, 0.04);
+  }
+
+  :global([data-theme="light"]) .child-row:hover {
+    background: rgba(0, 0, 0, 0.03);
   }
 </style>

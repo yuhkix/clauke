@@ -2,6 +2,7 @@
   import { convertFileSrc } from "@tauri-apps/api/core";
   import { tick } from "svelte";
   import type { ChatMessage } from "../types";
+  import { getToolIcon } from "../types";
   import { marked } from "marked";
   import hljs from "highlight.js";
   import ToolCallCard from "./ToolCallCard.svelte";
@@ -10,10 +11,12 @@
     message,
     onFork,
     onCopy,
+    onEdit,
   }: {
     message: ChatMessage;
     onFork?: (messageId: string) => void;
     onCopy?: (messageId: string) => void;
+    onEdit?: (messageId: string) => void;
   } = $props();
 
   const isUser = $derived(message.role === "user");
@@ -103,7 +106,7 @@
   });
 </script>
 
-<div class="message" class:user={isUser} class:assistant={!isUser} bind:this={contentEl}>
+<div class="message" class:user={isUser} class:assistant={!isUser} id={message.id} bind:this={contentEl}>
   <div class="meta">
     <span class="role">{isUser ? "you" : "claude"}</span>
     <span class="time">
@@ -125,14 +128,50 @@
     {#if userText}
       <div class="text">{userText}</div>
     {/if}
+    {#if onEdit}
+      <div class="actions user-actions">
+        <button class="action-btn" onclick={() => onEdit(message.id)} title="Edit & resend">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+            <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+          </svg>
+        </button>
+      </div>
+    {/if}
   {:else}
-    {#each message.content as block}
-      {#if block.type === "text" && block.text}
+    {#each message.content as block, i}
+      {#if block.type === "thinking" && block.text}
+        <div class="thinking-flow">{@html renderMarkdown(block.text)}</div>
+      {:else if block.type === "text" && block.text}
         <div class="prose">{@html renderMarkdown(block.text)}</div>
       {:else if block.type === "tool_call"}
-        <div class="tools">
-          <ToolCallCard toolCall={block.toolCall} />
-        </div>
+        {#if block.toolCall.name !== "Agent"}
+          <div class="tools">
+            <ToolCallCard toolCall={block.toolCall} />
+          </div>
+        {/if}
+        {#if block.toolCall.name === "Agent" && !block.toolCall.isComplete}
+          <div class="agent-indicator">
+            <div class="agent-indicator-track"></div>
+            <div class="agent-indicator-content">
+              <span class="agent-indicator-pulse"></span>
+              <span class="agent-indicator-label">agent</span>
+              {#if block.toolCall.input.description}
+                <span class="agent-indicator-desc">{String(block.toolCall.input.description).slice(0, 50)}</span>
+              {/if}
+              {#if block.toolCall.children?.length}
+                {@const lastChild = block.toolCall.children[block.toolCall.children.length - 1]}
+                {#if !lastChild.isComplete}
+                  <span class="agent-indicator-sep">&middot;</span>
+                  <span class="agent-indicator-activity">
+                    <span class="agent-indicator-tool-icon">{getToolIcon(lastChild.name)}</span>
+                    {lastChild.name}
+                  </span>
+                {/if}
+              {/if}
+            </div>
+          </div>
+        {/if}
       {/if}
     {/each}
 
@@ -398,7 +437,8 @@
     transition: opacity 0.2s var(--ease-out-quart);
   }
 
-  .message.assistant:hover .actions {
+  .message.assistant:hover .actions,
+  .message.user:hover .user-actions {
     opacity: 1;
   }
 
@@ -425,11 +465,236 @@
     color: rgba(130, 220, 160, 0.9);
   }
 
+  /* ── Thinking flow text ── */
+  .thinking-flow {
+    font-size: 12px;
+    line-height: 1.55;
+    color: var(--text-tertiary);
+    opacity: 0.55;
+    margin: 2px 0 6px;
+    word-break: break-word;
+    animation: slideUp 0.3s var(--ease-out-expo);
+  }
+
+  .thinking-flow :global(p) {
+    margin: 0 0 4px;
+  }
+  .thinking-flow :global(p:last-child) {
+    margin-bottom: 0;
+  }
+
+  .thinking-flow :global(code) {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    background: rgba(255, 255, 255, 0.04);
+    border-radius: 3px;
+    padding: 0 3px;
+  }
+
+  .thinking-flow :global(strong) {
+    font-weight: 500;
+    color: var(--text-tertiary);
+  }
+
+  .thinking-flow :global(.code-block) {
+    position: relative;
+    margin: 6px 0;
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+  }
+
+  .thinking-flow :global(.code-lang) {
+    display: block;
+    padding: 3px 10px;
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    font-weight: 500;
+    color: var(--text-tertiary);
+    opacity: 0.7;
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid rgba(255, 255, 255, 0.04);
+    border-bottom: none;
+    border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+    text-transform: lowercase;
+    letter-spacing: 0.5px;
+  }
+
+  .thinking-flow :global(pre) {
+    margin: 0;
+    background: rgba(0, 0, 0, 0.2);
+    border: 1px solid rgba(255, 255, 255, 0.04);
+    border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+    padding: 8px 12px;
+    overflow-x: auto;
+  }
+
+  .thinking-flow :global(.code-block:not(:has(.code-lang)) pre) {
+    border-radius: var(--radius-sm);
+  }
+
+  .thinking-flow :global(pre code) {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    line-height: 1.45;
+    background: none;
+    border: none;
+    border-radius: 0;
+    padding: 0;
+  }
+
+  .thinking-flow :global(.copy-btn) {
+    position: absolute;
+    top: 3px;
+    right: 5px;
+    padding: 1px 6px;
+    font-family: var(--font-mono);
+    font-size: 9px;
+    font-weight: 500;
+    color: var(--text-tertiary);
+    opacity: 0;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 3px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    z-index: 2;
+  }
+
+  .thinking-flow :global(.code-block:hover .copy-btn) {
+    opacity: 0.6;
+  }
+
+  .thinking-flow :global(.copy-btn:hover) {
+    opacity: 1;
+    color: var(--text-secondary);
+    background: rgba(255, 255, 255, 0.08);
+    border-color: rgba(255, 255, 255, 0.1);
+  }
+
+  .thinking-flow :global(.copy-btn.copied) {
+    color: rgba(130, 220, 160, 0.7);
+    border-color: rgba(130, 220, 160, 0.2);
+    opacity: 0.8;
+  }
+
+  :global([data-theme="light"]) .thinking-flow {
+    opacity: 0.45;
+  }
+
   .tools {
     display: flex;
     flex-direction: column;
     gap: 6px;
     margin: 4px 0;
+  }
+
+  /* ── Agent running indicator ── */
+  .agent-indicator {
+    position: relative;
+    margin: 2px 0 6px;
+    padding: 7px 12px;
+    border-radius: 6px;
+    background: linear-gradient(135deg, rgba(140, 120, 220, 0.08), rgba(100, 140, 255, 0.06));
+    border: 1px solid rgba(140, 120, 220, 0.15);
+    overflow: hidden;
+    animation: slideUp 0.35s var(--ease-out-expo);
+  }
+
+  .agent-indicator-track {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: linear-gradient(90deg, transparent, rgba(140, 120, 220, 0.5), rgba(100, 160, 255, 0.4), transparent);
+    background-size: 200% 100%;
+    animation: agentTrackSlide 2s linear infinite;
+  }
+
+  @keyframes agentTrackSlide {
+    0% { background-position: -200% 0; }
+    100% { background-position: 200% 0; }
+  }
+
+  .agent-indicator-content {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+  }
+
+  .agent-indicator-pulse {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: rgba(140, 120, 220, 0.7);
+    flex-shrink: 0;
+    animation: agentPulse 2s ease-in-out infinite;
+  }
+
+  @keyframes agentPulse {
+    0%, 100% { opacity: 0.4; box-shadow: 0 0 0 0 rgba(140, 120, 220, 0); }
+    50% { opacity: 1; box-shadow: 0 0 8px 2px rgba(140, 120, 220, 0.3); }
+  }
+
+  .agent-indicator-label {
+    font-weight: 500;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: rgba(160, 140, 240, 0.8);
+    flex-shrink: 0;
+  }
+
+  .agent-indicator-desc {
+    color: var(--text-secondary);
+    font-size: 11px;
+    font-weight: 400;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+  }
+
+  .agent-indicator-sep {
+    color: var(--text-tertiary);
+    opacity: 0.4;
+    flex-shrink: 0;
+  }
+
+  .agent-indicator-activity {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--text-tertiary);
+    font-size: 10.5px;
+    flex-shrink: 0;
+    opacity: 0.7;
+  }
+
+  .agent-indicator-tool-icon {
+    font-size: 9px;
+    opacity: 0.5;
+  }
+
+  :global([data-theme="light"]) .agent-indicator {
+    background: linear-gradient(135deg, rgba(100, 80, 200, 0.06), rgba(60, 100, 220, 0.04));
+    border-color: rgba(100, 80, 200, 0.12);
+  }
+
+  :global([data-theme="light"]) .agent-indicator-track {
+    background: linear-gradient(90deg, transparent, rgba(100, 80, 200, 0.4), rgba(60, 120, 220, 0.3), transparent);
+    background-size: 200% 100%;
+    animation: agentTrackSlide 2s linear infinite;
+  }
+
+  :global([data-theme="light"]) .agent-indicator-label {
+    color: rgba(100, 80, 200, 0.8);
+  }
+
+  :global([data-theme="light"]) .agent-indicator-pulse {
+    background: rgba(100, 80, 200, 0.6);
   }
 
   .user-images {
