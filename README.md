@@ -18,7 +18,9 @@
 
 **clauke** is a lightweight desktop wrapper around the `claude` CLI. It doesn't reimplement any Claude functionality — it simply spawns `claude --output-format stream-json` and renders the streaming events in a polished UI.
 
-<!-- TODO: Add screenshots -->
+<p align="center">
+  <img src="assets/clauke_preview.png" width="720" alt="clauke preview" />
+</p>
 
 ## Features
 
