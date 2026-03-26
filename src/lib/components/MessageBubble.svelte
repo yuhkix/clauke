@@ -4,7 +4,7 @@
   import type { ChatMessage } from "../types";
   import { getToolIcon } from "../types";
   import { marked } from "marked";
-  import hljs from "highlight.js";
+  import hljs from "highlight.js/lib/common";
   import ToolCallCard from "./ToolCallCard.svelte";
 
   let {
