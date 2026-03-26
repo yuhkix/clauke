@@ -28,11 +28,11 @@
 - **Streaming markdown** — syntax-highlighted code blocks, tables, diffs
 - **Tool call cards** — collapsible display for every tool invocation with inline diffs
 - **Sub-agent tracking** — live sidebar showing nested agent activity
-- **File tree** — see which files were touched, with diff stats
+- **File explorer** — browse project files, click to open in your editor, diff stats overlay
 - **Task panel** — TodoWrite tasks rendered as a checklist
 - **Context indicator** — visual fill bar showing context window usage
 - **Session history** — archive and restore past conversations
-- **Settings** — theme, MCP servers, hooks, permission modes
+- **Settings** — theme, MCP servers, hooks, permission modes, editor preference, CLI path verification
 - **Keyboard shortcuts** — Ctrl+T/W/L/B/1-9, Ctrl+/ for cheatsheet
 - **Custom titlebar** — frameless window, draggable, native window controls
 - **Tiny footprint** — uses system WebView2, no bundled Chromium (~3 MB installer)
@@ -57,7 +57,7 @@ Download the latest release from the [Releases](../../releases) page:
 
 ```bash
 # Clone the repo
-git clone https://github.com/mattiundtim/clauke.git
+git clone https://github.com/drvcvt/clauke.git
 cd clauke
 
 # Install frontend dependencies

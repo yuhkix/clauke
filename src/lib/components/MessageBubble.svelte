@@ -12,11 +12,13 @@
     onFork,
     onCopy,
     onEdit,
+    isStreaming = false,
   }: {
     message: ChatMessage;
     onFork?: (messageId: string) => void;
     onCopy?: (messageId: string) => void;
     onEdit?: (messageId: string) => void;
+    isStreaming?: boolean;
   } = $props();
 
   const isUser = $derived(message.role === "user");

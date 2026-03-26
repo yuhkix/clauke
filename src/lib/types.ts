@@ -21,6 +21,8 @@ export interface ToolCall {
   isError?: boolean;
   startTime: number;
   endTime?: number;
+  /** True when completion was inferred (no explicit tool_result received) */
+  inferredComplete?: boolean;
   /** For Agent tool calls: nested tool calls made by the sub-agent */
   children?: ToolCall[];
 }
@@ -77,9 +79,9 @@ export const MODEL_LABELS: Record<ClaudeModel, string> = {
   haiku: "Haiku",
 };
 
-/** Context window limits per model (in tokens) — all current Claude models use 200k */
+/** Context window limits per model (in tokens) */
 export const MODEL_CONTEXT_LIMITS: Record<ClaudeModel, number> = {
-  opus: 200_000,
+  opus: 1_000_000,
   sonnet: 200_000,
   haiku: 200_000,
 };
@@ -119,6 +121,34 @@ export function formatTokens(n: number): string {
   return Math.round(n / 1000) + "k";
 }
 
+/** API pricing per million tokens (as of 2025) */
+export const COST_PER_MILLION: Record<ClaudeModel, {
+  input: number; output: number; cacheRead: number; cacheWrite: number;
+}> = {
+  sonnet: { input: 3, output: 15, cacheRead: 0.30, cacheWrite: 3.75 },
+  opus:   { input: 15, output: 75, cacheRead: 1.50, cacheWrite: 18.75 },
+  haiku:  { input: 0.80, output: 4, cacheRead: 0.08, cacheWrite: 1.00 },
+};
+
+/** Estimate dollar cost from token usage */
+export function calculateCost(usage: TokenUsage, model: ClaudeModel): number {
+  const r = COST_PER_MILLION[model];
+  if (!r) return 0;
+  return (
+    usage.inputTokens * r.input +
+    usage.outputTokens * r.output +
+    usage.cacheReadTokens * r.cacheRead +
+    usage.cacheCreationTokens * r.cacheWrite
+  ) / 1_000_000;
+}
+
+/** Format dollar cost for display */
+export function formatCost(dollars: number): string {
+  if (dollars < 0.005) return "<$0.01";
+  if (dollars < 10) return `$${dollars.toFixed(2)}`;
+  return `$${dollars.toFixed(1)}`;
+}
+
 export interface Tab {
   id: string;
   name: string;
@@ -134,6 +164,19 @@ export interface Tab {
   permissionMode: PermissionMode;
   /** Per-tab system prompt (overrides global default when set) */
   systemPrompt?: string;
+  /** Additional directories Claude can access beyond CWD */
+  addDirs?: string[];
+  /** Selected agent name (from `claude agents`) */
+  agent?: string;
+  /** Timestamp when the current run started (for elapsed timer) */
+  runStartTime?: number;
+}
+
+/** Agent entry from `claude agents` output */
+export interface AgentInfo {
+  name: string;
+  model: string;
+  source: string;
 }
 
 /** A single task from Claude's TodoWrite tool */
@@ -345,121 +388,6 @@ export function extractFileStats(messages: ChatMessage[]): Map<string, FileStats
   return stats;
 }
 
-/** Build a tree node structure from flat file paths */
-export interface TreeNode {
-  name: string;
-  fullPath: string;
-  children: TreeNode[];
-  stats?: FileStats;
-  isDir: boolean;
-  /** Aggregate stats for directories */
-  totalAdded: number;
-  totalRemoved: number;
-}
-
-export function buildFileTree(stats: Map<string, FileStats>, cwd: string): TreeNode[] {
-  const root: Map<string, TreeNode> = new Map();
-
-  // Normalize and relativize paths (case-insensitive for Windows)
-  function relativize(path: string): string | null {
-    const normalized = path.replace(/\\/g, "/");
-    const normalizedCwd = cwd.replace(/\\/g, "/").replace(/\/$/, "");
-    if (!normalizedCwd) return normalized;
-    const normLower = normalized.toLowerCase();
-    const cwdLower = normalizedCwd.toLowerCase();
-    if (normLower.startsWith(cwdLower + "/")) {
-      return normalized.slice(normalizedCwd.length + 1);
-    }
-    // File is outside CWD — skip it
-    return null;
-  }
-
-  function ensureDir(parts: string[], tree: Map<string, TreeNode>): TreeNode {
-    const name = parts[0];
-    let node = tree.get(name);
-    if (!node) {
-      node = { name, fullPath: "", children: [], isDir: true, totalAdded: 0, totalRemoved: 0 };
-      tree.set(name, node);
-    }
-    if (parts.length > 1) {
-      const childMap = new Map(node.children.map(c => [c.name, c]));
-      const child = ensureDir(parts.slice(1), childMap);
-      node.children = Array.from(childMap.values());
-      return child;
-    }
-    return node;
-  }
-
-  for (const [path, fileStat] of stats) {
-    const rel = relativize(path);
-    if (rel === null) continue; // Outside CWD — skip
-    const parts = rel.split("/").filter(Boolean);
-    if (parts.length === 0) continue;
-
-    if (parts.length === 1) {
-      const existing = root.get(parts[0]);
-      if (existing) {
-        existing.stats = fileStat;
-        existing.fullPath = path;
-      } else {
-        root.set(parts[0], {
-          name: parts[0],
-          fullPath: path,
-          children: [],
-          stats: fileStat,
-          isDir: false,
-          totalAdded: 0,
-          totalRemoved: 0,
-        });
-      }
-    } else {
-      const dirParts = parts.slice(0, -1);
-      const fileName = parts[parts.length - 1];
-      const dirNode = ensureDir(dirParts, root);
-      const childMap = new Map(dirNode.children.map(c => [c.name, c]));
-      childMap.set(fileName, {
-        name: fileName,
-        fullPath: path,
-        children: [],
-        stats: fileStat,
-        isDir: false,
-        totalAdded: 0,
-        totalRemoved: 0,
-      });
-      dirNode.children = Array.from(childMap.values());
-    }
-  }
-
-  // Aggregate stats up the tree
-  function aggregate(node: TreeNode): { added: number; removed: number } {
-    let added = node.stats?.added || 0;
-    let removed = node.stats?.removed || 0;
-    for (const child of node.children) {
-      const childStats = aggregate(child);
-      added += childStats.added;
-      removed += childStats.removed;
-    }
-    node.totalAdded = added;
-    node.totalRemoved = removed;
-    return { added, removed };
-  }
-
-  const nodes = Array.from(root.values());
-  for (const node of nodes) aggregate(node);
-
-  // Sort: directories first, then alphabetically
-  function sortTree(nodes: TreeNode[]): TreeNode[] {
-    nodes.sort((a, b) => {
-      if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
-      return a.name.localeCompare(b.name);
-    });
-    for (const n of nodes) sortTree(n.children);
-    return nodes;
-  }
-
-  return sortTree(nodes);
-}
-
 /** Tool icons (simple text-based) */
 export const TOOL_ICONS: Record<string, string> = {
   Bash: "$",
@@ -469,6 +397,7 @@ export const TOOL_ICONS: Record<string, string> = {
   Grep: "/",
   Glob: "*",
   Agent: "A",
+  Thinking: "\u2026",
   WebFetch: "~",
   WebSearch: "?",
 };

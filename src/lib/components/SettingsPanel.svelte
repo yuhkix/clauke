@@ -52,6 +52,76 @@
   );
   let lastCleanupResult = $state<string | null>(null);
 
+  // ── Help tooltips ──
+  let helpVisible = $state(false);
+  let helpText = $state("");
+  let helpPos = $state({ x: 0, y: 0 });
+  let helpTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const helpContent: Record<string, string> = {
+    cli: "clauke needs the Claude Code CLI to work.\n\nInstall it via npm:\n  npm install -g @anthropic-ai/claude-code\n\nThen run 'claude' once in a terminal to authenticate.\n\nIf the status shows a red X, Claude CLI is not in your PATH. Either:\n  1. Restart clauke after installing\n  2. Set the full path below (e.g. C:\\Users\\you\\AppData\\Roaming\\npm\\claude.cmd)\n\nClick 'verify' to re-check after changes.",
+    mcp: "MCP (Model Context Protocol) servers extend Claude with custom tools.\n\nAdd a server by providing:\n  name — unique identifier\n  command — e.g. npx, node, python\n  args — command arguments\n\nExample: name=filesystem, command=npx, args=-y @anthropic/mcp-filesystem",
+    hooks: "Hooks run shell commands at specific points in Claude's lifecycle.\n\nEvents:\n  PreToolUse — before a tool runs\n  PostToolUse — after a tool runs\n  SessionStart/End — session lifecycle\n  Stop — when Claude finishes\n\nMatcher is a regex to filter tool names (e.g. Edit|Write).",
+  };
+
+  function showHelp(target: EventTarget | null, key: string) {
+    if (helpTimer) clearTimeout(helpTimer);
+    helpTimer = setTimeout(() => {
+      helpText = helpContent[key] || "";
+      if (target && target instanceof HTMLElement) {
+        const rect = target.getBoundingClientRect();
+        helpPos = { x: rect.left, y: rect.bottom + 6 };
+      }
+      helpVisible = true;
+    }, 800);
+  }
+
+  function hideHelp() {
+    if (helpTimer) { clearTimeout(helpTimer); helpTimer = null; }
+    helpVisible = false;
+  }
+
+  // ── Claude CLI ──
+  let claudePath = $state(localStorage.getItem("clauke:claudePath") || "");
+  let cliStatus = $state<"unknown" | "checking" | "ok" | "error">("unknown");
+  let cliVersion = $state("");
+  let cliError = $state("");
+
+  async function checkCli() {
+    cliStatus = "checking";
+    try {
+      const version = await invoke<string>("check_claude_cli", {
+        customPath: claudePath || null,
+      });
+      cliVersion = version;
+      cliStatus = "ok";
+    } catch (e) {
+      cliError = String(e);
+      cliStatus = "error";
+    }
+  }
+
+  function saveClaudePath() {
+    localStorage.setItem("clauke:claudePath", claudePath);
+    checkCli();
+  }
+
+  // ── Editor ──
+  interface EditorEntry { id: string; name: string; command: string; }
+  let detectedEditors = $state<EditorEntry[]>([]);
+  let editorLoading = $state(false);
+  let selectedEditor = $state(localStorage.getItem("clauke:editor") || "");
+
+  async function loadEditors() {
+    editorLoading = true;
+    try {
+      detectedEditors = await invoke<EditorEntry[]>("detect_editors");
+    } catch {
+      detectedEditors = [];
+    }
+    editorLoading = false;
+  }
+
   // Sync open prop to visible with close animation
   $effect(() => {
     if (isOpen && !visible) {
@@ -277,11 +347,13 @@
   // Emit initial settings
   emitAll();
 
-  // Load MCP servers and hooks when panel opens
+  // Load MCP servers, hooks, editors, and CLI status when panel opens
   $effect(() => {
     if (isOpen) {
       loadMcpServers();
       loadHooks();
+      loadEditors();
+      checkCli();
     }
   });
 </script>
@@ -307,6 +379,66 @@
       </div>
 
       <div class="sections">
+        <!-- ── Claude CLI ── -->
+        <div class="section">
+          <div class="section-title">
+            claude cli
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <span class="help-trigger" onmouseenter={(e) => showHelp(e.currentTarget, 'cli')} onmouseleave={hideHelp}>?</span>
+          </div>
+
+          <div class="row">
+            <div class="label-group">
+              <span class="label">status</span>
+              <span class="desc">
+                {#if cliStatus === "checking"}
+                  checking...
+                {:else if cliStatus === "ok"}
+                  {cliVersion}
+                {:else if cliStatus === "error"}
+                  {cliError}
+                {:else}
+                  not checked yet
+                {/if}
+              </span>
+            </div>
+            <div class="cli-status">
+              {#if cliStatus === "ok"}
+                <span class="cli-ok" title="Claude CLI found">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="20 6 9 17 4 12" />
+                  </svg>
+                </span>
+              {:else if cliStatus === "error"}
+                <span class="cli-err" title="Claude CLI not found">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+                  </svg>
+                </span>
+              {:else if cliStatus === "checking"}
+                <span class="cli-checking"></span>
+              {/if}
+            </div>
+          </div>
+
+          <div class="row-col">
+            <div class="label-group">
+              <span class="label">custom path</span>
+              <span class="desc">leave empty to use "claude" from PATH</span>
+            </div>
+            <div class="cli-path-row">
+              <input
+                class="mcp-input"
+                placeholder="claude"
+                bind:value={claudePath}
+                onblur={saveClaudePath}
+                onkeydown={(e) => { if (e.key === 'Enter') saveClaudePath(); }}
+              />
+              <button class="pill" onclick={checkCli}>verify</button>
+            </div>
+          </div>
+        </div>
+
         <!-- ── Appearance ── -->
         <div class="section">
           <div class="section-title">appearance</div>
@@ -396,6 +528,32 @@
           </div>
         </div>
 
+        <!-- ── Editor ── -->
+        <div class="section">
+          <div class="section-title">editor</div>
+
+          <div class="row">
+            <div class="label-group">
+              <span class="label">preferred editor</span>
+              <span class="desc">click files in explorer to open</span>
+            </div>
+            {#if editorLoading}
+              <span class="desc" style="flex-shrink:0">detecting...</span>
+            {:else if detectedEditors.length > 0}
+              <button class="pill" onclick={() => {
+                const ids = ["", ...detectedEditors.map(e => e.id)];
+                const idx = ids.indexOf(selectedEditor);
+                selectedEditor = ids[(idx + 1) % ids.length];
+                save("editor", selectedEditor);
+              }}>
+                {detectedEditors.find(e => e.id === selectedEditor)?.name || "none"}
+              </button>
+            {:else}
+              <span class="desc" style="flex-shrink:0; opacity:0.5">no editors found</span>
+            {/if}
+          </div>
+        </div>
+
         <!-- ── Permissions ── -->
         <div class="section">
           <div class="section-title">permissions</div>
@@ -411,7 +569,11 @@
 
         <!-- ── MCP Servers ── -->
         <div class="section">
-          <div class="section-title">mcp servers</div>
+          <div class="section-title">
+            mcp servers
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <span class="help-trigger" onmouseenter={(e) => showHelp(e.currentTarget, 'mcp')} onmouseleave={hideHelp}>?</span>
+          </div>
 
           {#if mcpLoading}
             <div class="mcp-empty">loading…</div>
@@ -457,7 +619,11 @@
 
         <!-- ── Hooks ── -->
         <div class="section">
-          <div class="section-title">hooks</div>
+          <div class="section-title">
+            hooks
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <span class="help-trigger" onmouseenter={(e) => showHelp(e.currentTarget, 'hooks')} onmouseleave={hideHelp}>?</span>
+          </div>
 
           {#if hooksLoading}
             <div class="mcp-empty">loading…</div>
@@ -559,6 +725,12 @@
   </div>
 {/if}
 
+{#if helpVisible}
+  <div class="help-tooltip" style="left: {helpPos.x}px; top: {helpPos.y}px;">
+    <pre class="help-text">{helpText}</pre>
+  </div>
+{/if}
+
 <style>
   .overlay {
     position: fixed;
@@ -602,13 +774,23 @@
     max-height: calc(100vh - 96px);
     overflow-y: auto;
     background: var(--panel-bg);
-    backdrop-filter: blur(48px) saturate(1.4);
-    -webkit-backdrop-filter: blur(48px) saturate(1.4);
+    backdrop-filter: var(--glass-panel-blur);
+    -webkit-backdrop-filter: var(--glass-panel-blur);
     border: 1px solid var(--panel-border);
     border-radius: var(--radius-md);
     box-shadow: var(--panel-shadow), var(--panel-inset);
     animation: panelIn 0.3s var(--ease-out-expo) forwards;
     transform-origin: top right;
+  }
+
+  :global(html.transparent) .panel {
+    --panel-bg: rgba(255, 255, 255, 0.05);
+    --panel-header-bg: rgba(255, 255, 255, 0.06);
+  }
+
+  :global([data-theme="light"].transparent) .panel {
+    --panel-bg: rgba(0, 0, 0, 0.05);
+    --panel-header-bg: rgba(0, 0, 0, 0.06);
   }
 
   :global([data-theme="light"]) .panel {
@@ -659,8 +841,8 @@
     position: sticky;
     top: 0;
     background: var(--panel-header-bg);
-    backdrop-filter: blur(48px);
-    -webkit-backdrop-filter: blur(48px);
+    backdrop-filter: var(--glass-panel-blur);
+    -webkit-backdrop-filter: var(--glass-panel-blur);
     z-index: 1;
   }
 
@@ -1005,12 +1187,22 @@
     outline: none;
     cursor: pointer;
     transition: border-color 0.2s ease;
-    appearance: none;
+  }
+
+  .hook-select option {
+    background: #1a1a2e;
+    color: var(--text-secondary);
+    padding: 4px 8px;
   }
 
   .hook-select:focus {
     border-color: var(--border-focus);
     color: var(--text);
+  }
+
+  :global([data-theme="light"]) .hook-select option {
+    background: #f8f8fa;
+    color: #333;
   }
 
   .sys-prompt {
@@ -1032,6 +1224,115 @@
     border-color: var(--border-focus);
     color: var(--text);
   }
+  .help-trigger {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    font-size: 9px;
+    font-weight: 600;
+    font-style: normal;
+    color: var(--text-tertiary);
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--border-subtle);
+    cursor: help;
+    margin-left: 6px;
+    vertical-align: middle;
+    transition: all 0.15s ease;
+    line-height: 1;
+  }
+
+  .help-trigger:hover {
+    color: var(--text-secondary);
+    background: rgba(255, 255, 255, 0.1);
+    border-color: var(--border);
+  }
+
+  .help-tooltip {
+    position: fixed;
+    z-index: 200;
+    max-width: 280px;
+    padding: 10px 12px;
+    background: rgba(20, 20, 35, 0.96);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 8px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+    animation: helpIn 0.15s var(--ease-out-expo);
+    pointer-events: none;
+  }
+
+  @keyframes helpIn {
+    from { opacity: 0; transform: translateY(-4px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .help-text {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    line-height: 1.5;
+    color: var(--text-secondary);
+    margin: 0;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+  }
+
+  :global([data-theme="light"]) .help-tooltip {
+    background: rgba(250, 250, 252, 0.96);
+    border-color: rgba(0, 0, 0, 0.1);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12);
+  }
+
+  :global([data-theme="light"]) .help-trigger {
+    background: rgba(0, 0, 0, 0.04);
+  }
+
+  :global([data-theme="light"]) .help-trigger:hover {
+    background: rgba(0, 0, 0, 0.08);
+  }
+
+  .cli-status {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+  }
+
+  .cli-ok {
+    color: rgba(100, 220, 140, 0.9);
+    display: flex;
+  }
+
+  .cli-err {
+    color: rgba(255, 100, 100, 0.9);
+    display: flex;
+  }
+
+  .cli-checking {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    border: 2px solid var(--text-tertiary);
+    border-top-color: transparent;
+    animation: spin 0.6s linear infinite;
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+
+  .cli-path-row {
+    display: flex;
+    gap: 4px;
+    align-items: center;
+  }
+
+  .cli-path-row .mcp-input {
+    flex: 1;
+  }
+
   .sys-prompt::placeholder {
     color: var(--text-tertiary);
   }

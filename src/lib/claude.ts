@@ -108,6 +108,33 @@ export function processClaudeEvent(
   }
 
   /**
+   * Append text to the active Agent's thinking pseudo-child.
+   * Returns true if text was captured, false if no Agent is active.
+   */
+  function appendAgentThinking(text: string): boolean {
+    if (!text || activeAgentStack.length === 0) return false;
+    const parentId = activeAgentStack[activeAgentStack.length - 1];
+    const parent = findToolCallGlobal(parentId);
+    if (!parent) return false;
+    if (!parent.children) parent.children = [];
+
+    const lastChild = parent.children[parent.children.length - 1];
+    if (lastChild && lastChild.name === "Thinking" && !lastChild.isComplete) {
+      lastChild.result = (lastChild.result || "") + text;
+    } else {
+      parent.children.push({
+        id: nextId(),
+        name: "Thinking",
+        input: {},
+        result: text,
+        isComplete: false,
+        startTime: Date.now(),
+      });
+    }
+    return true;
+  }
+
+  /**
    * Add a tool call — either as a top-level content block or as a child
    * of the currently-active Agent (if one is running).
    */
@@ -119,6 +146,12 @@ export function processClaudeEvent(
       const parent = findToolCallGlobal(parentId);
       if (parent) {
         if (!parent.children) parent.children = [];
+        // Close any open Thinking pseudo-child
+        const lastChild = parent.children[parent.children.length - 1];
+        if (lastChild?.name === "Thinking" && !lastChild.isComplete) {
+          lastChild.isComplete = true;
+          lastChild.endTime = Date.now();
+        }
         parent.children.push(tc);
         return;
       }
@@ -188,12 +221,12 @@ export function processClaudeEvent(
       if (block.type === "tool_call" && !block.toolCall.isComplete) {
         // Don't mark Agents that are still on the active stack — they're running
         if (block.toolCall.name === "Agent" && activeAgentStack.includes(block.toolCall.id)) {
-          // But DO mark their incomplete children (the previous child is done
-          // if a new event is starting)
+          // Mark incomplete tool children (not Thinking — those close via addToolCall)
           if (block.toolCall.children) {
             for (const child of block.toolCall.children) {
-              if (!child.isComplete) {
+              if (!child.isComplete && child.name !== "Thinking") {
                 child.isComplete = true;
+                child.inferredComplete = true;
                 if (!child.endTime) child.endTime = Date.now();
               }
             }
@@ -207,6 +240,7 @@ export function processClaudeEvent(
           for (const child of block.toolCall.children) {
             if (!child.isComplete) {
               child.isComplete = true;
+              if (child.name !== "Thinking") child.inferredComplete = true;
               if (!child.endTime) child.endTime = Date.now();
             }
           }
@@ -260,6 +294,7 @@ export function processClaudeEvent(
           for (const child of tc.children) {
             if (!child.isComplete) {
               child.isComplete = true;
+              if (child.name !== "Thinking") child.inferredComplete = true;
               if (!child.endTime) child.endTime = Date.now();
             }
           }
@@ -312,12 +347,16 @@ export function processClaudeEvent(
       if (!message) return UNMODIFIED;
 
       if (message.type === "thinking") {
-        // Thinking block — append to current thinking block
-        getLastThinkingBlock(msg).text += (message.thinking as string) || (message.text as string) || "";
+        const text = (message.thinking as string) || (message.text as string) || "";
+        if (!appendAgentThinking(text)) {
+          getLastThinkingBlock(msg).text += text;
+        }
       } else if (message.type === "text") {
-        // New text block starting → any pending tool calls have finished
         markPendingToolsComplete(msg);
-        getLastTextBlock(msg).text += (message.text as string) || "";
+        const text = (message.text as string) || "";
+        if (!appendAgentThinking(text)) {
+          getLastTextBlock(msg).text += text;
+        }
       } else if (message.type === "tool_use") {
         // New tool_use → any previously pending tool calls have finished
         markPendingToolsComplete(msg);
@@ -373,10 +412,12 @@ export function processClaudeEvent(
       const msg = getAssistantMessage();
       const block = event.content_block as Record<string, unknown> | undefined;
       if (block?.type === "thinking") {
-        // Thinking block starting — ensure a fresh thinking block
-        const lastContent = msg.content[msg.content.length - 1];
-        if (lastContent && lastContent.type === "thinking" && lastContent.text) {
-          msg.content.push({ type: "thinking", text: "" });
+        // Only create main-message thinking block when not inside an Agent
+        if (activeAgentStack.length === 0) {
+          const lastContent = msg.content[msg.content.length - 1];
+          if (lastContent && lastContent.type === "thinking" && lastContent.text) {
+            msg.content.push({ type: "thinking", text: "" });
+          }
         }
       } else if (block?.type === "tool_use") {
         // New tool starting → mark any previous pending tools as complete
@@ -390,13 +431,13 @@ export function processClaudeEvent(
         };
         addToolCall(msg, tc);
       } else if (block?.type === "text") {
-        // Text block starting → any pending tool calls are done
         markPendingToolsComplete(msg);
-        // If the previous content is already a text block with content,
-        // start a fresh block so consecutive text blocks don't merge without spacing
-        const lastContent = msg.content[msg.content.length - 1];
-        if (lastContent && lastContent.type === "text" && lastContent.text) {
-          msg.content.push({ type: "text", text: "" });
+        // Only create main-message text block when not inside an Agent
+        if (activeAgentStack.length === 0) {
+          const lastContent = msg.content[msg.content.length - 1];
+          if (lastContent && lastContent.type === "text" && lastContent.text) {
+            msg.content.push({ type: "text", text: "" });
+          }
         }
       }
       return MODIFIED;
@@ -406,18 +447,26 @@ export function processClaudeEvent(
       const msg = getAssistantMessage();
       const delta = event.delta as Record<string, unknown> | undefined;
       if (delta?.type === "thinking_delta") {
-        getLastThinkingBlock(msg).text += (delta.thinking as string) || "";
-      } else if (delta?.type === "text_delta") {
-        // Text arriving after a tool_use → tool is done
-        const lastTc = getLastToolCall(msg);
-        if (lastTc && !lastTc.isComplete) {
-          // Check if the last content block is NOT the tool call (i.e., text is appending elsewhere)
-          const lastBlock = msg.content[msg.content.length - 1];
-          if (!lastBlock || lastBlock.type !== "tool_call") {
-            markPendingToolsComplete(msg);
-          }
+        const text = (delta.thinking as string) || "";
+        if (!appendAgentThinking(text)) {
+          getLastThinkingBlock(msg).text += text;
         }
-        getLastTextBlock(msg).text += (delta.text as string) || "";
+      } else if (delta?.type === "text_delta") {
+        const text = (delta.text as string) || "";
+        if (activeAgentStack.length > 0) {
+          // Inside an Agent — capture as agent thinking
+          appendAgentThinking(text);
+        } else {
+          // Normal text — mark pending tools and append
+          const lastTc = getLastToolCall(msg);
+          if (lastTc && !lastTc.isComplete) {
+            const lastBlock = msg.content[msg.content.length - 1];
+            if (!lastBlock || lastBlock.type !== "tool_call") {
+              markPendingToolsComplete(msg);
+            }
+          }
+          getLastTextBlock(msg).text += text;
+        }
       } else if (delta?.type === "input_json_delta") {
         // Tool input streaming — append to last tool call's raw input
         const lastTc = getLastToolCall(msg);
@@ -445,6 +494,26 @@ export function processClaudeEvent(
         delete lastTc.input.__raw;
       }
       return MODIFIED;
+    }
+
+    // User message — contains tool_result blocks from CLI tool execution
+    case "user": {
+      const userMsg = event.message as Record<string, unknown> | undefined;
+      if (!userMsg) return UNMODIFIED;
+      const content = userMsg.content as Array<Record<string, unknown>> | undefined;
+      if (!Array.isArray(content)) return UNMODIFIED;
+      let didModify = false;
+      for (const block of content) {
+        if (block.type === "tool_result") {
+          handleToolResult(
+            block.tool_use_id as string,
+            block.content,
+            block.is_error as boolean | undefined,
+          );
+          didModify = true;
+        }
+      }
+      return didModify ? MODIFIED : UNMODIFIED;
     }
 
     // Tool result — explicit type
@@ -496,12 +565,14 @@ export function processClaudeEvent(
       for (const block of msg.content) {
         if (block.type === "tool_call" && !block.toolCall.isComplete) {
           block.toolCall.isComplete = true;
+          block.toolCall.inferredComplete = true;
           if (!block.toolCall.endTime) block.toolCall.endTime = Date.now();
         }
         if (block.type === "tool_call" && block.toolCall.children) {
           for (const child of block.toolCall.children) {
             if (!child.isComplete) {
               child.isComplete = true;
+              if (child.name !== "Thinking") child.inferredComplete = true;
               if (!child.endTime) child.endTime = Date.now();
             }
           }

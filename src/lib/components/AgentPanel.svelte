@@ -47,6 +47,8 @@
   }
 
   function formatDuration(tc: ToolCall): string {
+    // Don't show misleading durations for inferred completions
+    if (tc.inferredComplete) return "";
     const end = tc.endTime ?? now;
     const secs = (end - tc.startTime) / 1000;
     if (secs < 60) return `${secs.toFixed(1)}s`;
@@ -73,6 +75,10 @@
   function childSummary(tc: ToolCall): string {
     const input = tc.input;
     switch (tc.name) {
+      case "Thinking": {
+        const text = (tc.result || "").replace(/\s+/g, " ").trim();
+        return text.length > 50 ? text.slice(0, 50) + "..." : text || "...";
+      }
       case "Read": return (input.file_path as string)?.split(/[\\/]/).pop() || "file";
       case "Write": return (input.file_path as string)?.split(/[\\/]/).pop() || "file";
       case "Edit": return (input.file_path as string)?.split(/[\\/]/).pop() || "file";
@@ -181,10 +187,14 @@
             {#if !agent.isComplete && agent.children?.length}
               {@const current = activeChild(agent)}
               {#if current}
-                <div class="agent-activity">
+                <div class="agent-activity" class:thinking-activity={current.name === "Thinking"}>
                   <span class="activity-icon">{getToolIcon(current.name)}</span>
-                  <span class="activity-tool">{current.name}</span>
-                  <span class="activity-detail">{childSummary(current)}</span>
+                  {#if current.name === "Thinking"}
+                    <span class="activity-detail thinking-text">{childSummary(current)}</span>
+                  {:else}
+                    <span class="activity-tool">{current.name}</span>
+                    <span class="activity-detail">{childSummary(current)}</span>
+                  {/if}
                 </div>
               {/if}
             {:else if agent.isComplete}
@@ -199,19 +209,20 @@
               <!-- Children activity feed -->
               {#if agent.children?.length}
                 <div class="agent-section">
-                  <span class="section-label">activity ({agent.children.length})</span>
+                  <span class="section-label">activity ({agent.children.filter(c => c.name !== "Thinking").length} tools)</span>
                   <div class="children-list" bind:this={childrenListEl}>
                     {#each agent.children as child (child.id)}
                       <div
                         class="child-row"
                         class:child-done={child.isComplete}
                         class:child-error={child.isError}
+                        class:child-thinking={child.name === "Thinking"}
                         class:child-expanded={expandedChildId === child.id}
                         role="button"
                         tabindex="0"
                         onclick={() => expandedChildId = expandedChildId === child.id ? null : child.id}
                         onkeydown={(e) => e.key === "Enter" && (expandedChildId = expandedChildId === child.id ? null : child.id)}
-                        title={childFullPath(child)}
+                        title={child.name === "Thinking" ? (child.result?.slice(0, 200) || "") : childFullPath(child)}
                       >
                         <span class="child-status">
                           {#if !child.isComplete}
@@ -223,19 +234,23 @@
                           {/if}
                         </span>
                         <span class="child-icon">{getToolIcon(child.name)}</span>
-                        <span class="child-name">{child.name}</span>
-                        <span class="child-detail">{childSummary(child)}</span>
+                        {#if child.name === "Thinking"}
+                          <span class="child-detail child-thinking-preview">{childSummary(child)}</span>
+                        {:else}
+                          <span class="child-name">{child.name}</span>
+                          <span class="child-detail">{childSummary(child)}</span>
+                        {/if}
                         <span class="child-dur">{formatDuration(child)}</span>
                       </div>
                       {#if expandedChildId === child.id}
                         <div class="child-body">
-                          {#if Object.keys(child.input).length > 0}
+                          {#if child.name !== "Thinking" && Object.keys(child.input).length > 0}
                             <pre class="child-block">{JSON.stringify(child.input, null, 2)}</pre>
                           {/if}
                           {#if child.result}
                             {@const r = truncateResult(child.result, 20)}
-                            <pre class="child-block child-result-text">{r.text}{#if r.truncated}<span class="child-fade-out"></span>{/if}</pre>
-                          {:else if child.isComplete}
+                            <pre class="child-block child-result-text" class:child-thinking-text={child.name === "Thinking"}>{r.text}{#if r.truncated}<span class="child-fade-out"></span>{/if}</pre>
+                          {:else if child.isComplete && !child.inferredComplete}
                             <span class="child-no-output">no output</span>
                           {/if}
                         </div>
@@ -335,9 +350,9 @@
     top: 12px;
     bottom: 12px;
     width: 280px;
-    background: rgba(255, 255, 255, 0.06);
-    -webkit-backdrop-filter: blur(40px) saturate(1.3);
-    backdrop-filter: blur(40px) saturate(1.3);
+    background: var(--glass-panel-bg);
+    -webkit-backdrop-filter: var(--glass-panel-blur);
+    backdrop-filter: var(--glass-panel-blur);
     border: 1px solid var(--border);
     border-radius: var(--radius-md);
     display: flex;
@@ -345,7 +360,6 @@
     z-index: 9;
     animation: panelSlideIn 0.25s var(--ease-out-expo);
     overflow: hidden;
-    will-change: backdrop-filter;
   }
 
   @keyframes panelSlideIn {
@@ -815,8 +829,45 @@
     padding: 2px 0;
   }
 
+  /* ── Thinking children ── */
+  .child-row.child-thinking {
+    opacity: 0.45;
+  }
+
+  .child-row.child-thinking:hover {
+    opacity: 0.7;
+  }
+
+  .child-row.child-thinking.child-expanded {
+    opacity: 0.7;
+  }
+
+  .child-row.child-thinking:not(.child-done) {
+    opacity: 0.6;
+  }
+
+  .child-thinking-preview {
+    font-style: italic;
+    opacity: 0.5;
+  }
+
+  .child-thinking-text {
+    font-style: italic;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .thinking-activity {
+    opacity: 0.5;
+  }
+
+  .thinking-text {
+    font-style: italic;
+    opacity: 0.6;
+  }
+
   :global([data-theme="light"]) .agent-panel {
-    background: var(--bg-glass);
+    background: var(--glass-panel-bg);
     box-shadow: 0 8px 40px rgba(0, 0, 0, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.5);
   }
 

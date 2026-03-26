@@ -26,21 +26,21 @@
 
   const shortcuts = [
     { section: "tabs" },
-    { keys: "Ctrl + T", desc: "Neuer Tab" },
-    { keys: "Ctrl + W", desc: "Tab schließen" },
-    { keys: "Ctrl + 1–9", desc: "Zum Tab N wechseln" },
+    { keys: "Ctrl + T", desc: "New tab" },
+    { keys: "Ctrl + W", desc: "Close tab" },
+    { keys: "Ctrl + 1–9", desc: "Switch to tab N" },
     { section: "chat" },
-    { keys: "Enter", desc: "Prompt senden" },
-    { keys: "Shift + Enter", desc: "Zeilenumbruch" },
-    { keys: "Ctrl + L", desc: "Chat leeren" },
-    { keys: "Ctrl + F", desc: "Suche in Conversation" },
+    { keys: "Enter", desc: "Send prompt" },
+    { keys: "Shift + Enter", desc: "New line" },
+    { keys: "Ctrl + L", desc: "Clear chat" },
+    { keys: "Ctrl + F", desc: "Search conversation" },
     { section: "panels" },
-    { keys: "Ctrl + B", desc: "Dateibaum ein/ausblenden" },
-    { keys: "Ctrl + /", desc: "Shortcuts anzeigen" },
+    { keys: "Ctrl + B", desc: "Toggle file explorer" },
+    { keys: "Ctrl + /", desc: "Show shortcuts" },
     { section: "input" },
-    { keys: "Tab", desc: "Slash-Command vervollständigen" },
-    { keys: "↑ / ↓", desc: "Vorschläge navigieren" },
-    { keys: "Escape", desc: "Vorschläge schließen" },
+    { keys: "Tab", desc: "Complete slash command" },
+    { keys: "↑ / ↓", desc: "Navigate suggestions" },
+    { keys: "Escape", desc: "Dismiss suggestions" },
   ];
 </script>
 

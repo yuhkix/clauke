@@ -34,6 +34,14 @@ struct PromptRequest {
     allowed_tools: Option<Vec<String>>,
     /// Custom system prompt to append
     system_prompt: Option<String>,
+    /// Additional directories Claude can access
+    add_dirs: Option<Vec<String>>,
+    /// Agent to use (from `claude agents`)
+    agent: Option<String>,
+    /// Continue the most recent session in this CWD
+    continue_last: Option<bool>,
+    /// Custom path to the claude binary (overrides "claude" in PATH)
+    claude_path: Option<String>,
 }
 
 /// Send a prompt to Claude Code CLI and stream events back via Tauri events.
@@ -60,6 +68,10 @@ async fn send_prompt(
     let skip_perms = request.skip_permissions.unwrap_or(true);
     let allowed_tools = request.allowed_tools.clone().unwrap_or_default();
     let sys_prompt = request.system_prompt.clone();
+    let add_dirs = request.add_dirs.clone().unwrap_or_default();
+    let agent = request.agent.clone();
+    let continue_last = request.continue_last.unwrap_or(false);
+    let claude_path = request.claude_path.clone();
     let at_ref: Option<&[String]> = if allowed_tools.is_empty() { None } else { Some(&allowed_tools) };
     let mut runner =
         ClaudeRunner::spawn(
@@ -71,6 +83,10 @@ async fn send_prompt(
             skip_perms,
             at_ref,
             sys_prompt.as_deref(),
+            &add_dirs,
+            agent.as_deref(),
+            continue_last,
+            claude_path.as_deref(),
         )
             .map_err(|e| format!("Failed to spawn claude: {}", e))?;
 
@@ -486,8 +502,8 @@ async fn remove_hook(event: String, index: usize) -> Result<(), String> {
 /// Generate a short title for a conversation given the first user prompt.
 /// Uses claude CLI with haiku for speed.
 #[tauri::command]
-async fn generate_title(prompt: String) -> Result<String, String> {
-    let mut cmd = tokio::process::Command::new("claude");
+async fn generate_title(prompt: String, claude_path: Option<String>) -> Result<String, String> {
+    let mut cmd = tokio::process::Command::new(claude_path.as_deref().unwrap_or("claude"));
     cmd.args([
         "-p",
         &format!("Generate a very short title (max 5 words, no quotes, no punctuation at end) for a conversation that starts with this prompt: {}", prompt),
@@ -569,10 +585,227 @@ async fn storage_delete(key: String) -> Result<(), String> {
     Ok(())
 }
 
+/// An agent entry parsed from `claude agents` output.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct AgentEntry {
+    name: String,
+    model: String,
+    source: String,
+}
+
+/// List available agents by running `claude agents` and parsing the output.
+#[tauri::command]
+async fn list_agents() -> Result<Vec<AgentEntry>, String> {
+    let mut cmd = tokio::process::Command::new("claude");
+    cmd.arg("agents");
+
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run `claude agents`: {}", e))?;
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut agents = Vec::new();
+    let mut current_source = String::new();
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        // Section headers like "User agents:", "Built-in agents:", "Plugin agents:"
+        if trimmed.ends_with("agents:") || trimmed.ends_with("agents :") {
+            current_source = trimmed
+                .trim_end_matches(':')
+                .trim_end_matches(" agents")
+                .trim()
+                .to_string();
+            continue;
+        }
+        // Agent lines: "  name . model" or "  name:subname . model"
+        if let Some(dot_pos) = trimmed.find(" . ") {
+            let name = trimmed[..dot_pos].trim().to_string();
+            let model = trimmed[dot_pos + 3..].trim().to_string();
+            if !name.is_empty() {
+                agents.push(AgentEntry {
+                    name,
+                    model,
+                    source: current_source.clone(),
+                });
+            }
+        }
+    }
+
+    Ok(agents)
+}
+
 /// Return the CLI interaction mode so the frontend knows whether steering is available.
 #[tauri::command]
 async fn get_cli_mode() -> String {
     "interactive".to_string()
+}
+
+// ── File explorer ──
+
+#[derive(Debug, Serialize, Deserialize)]
+struct FsEntry {
+    name: String,
+    path: String,
+    is_dir: bool,
+    size: u64,
+    extension: Option<String>,
+}
+
+/// List directory contents for the file explorer.
+#[tauri::command]
+async fn list_directory(path: String) -> Result<Vec<FsEntry>, String> {
+    let dir = std::path::Path::new(&path);
+    if !dir.is_dir() {
+        return Ok(vec![]);
+    }
+
+    let read_dir = std::fs::read_dir(dir).map_err(|e| e.to_string())?;
+    let hidden = [".git", "node_modules", "__pycache__"];
+
+    let mut entries: Vec<FsEntry> = read_dir
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if hidden.contains(&name.as_str()) {
+                return None;
+            }
+            let meta = entry.metadata().ok()?;
+            let is_dir = meta.is_dir();
+            Some(FsEntry {
+                extension: if is_dir {
+                    None
+                } else {
+                    entry.path().extension().and_then(|e| e.to_str()).map(String::from)
+                },
+                name,
+                path: entry.path().to_string_lossy().to_string(),
+                is_dir,
+                size: if is_dir { 0 } else { meta.len() },
+            })
+        })
+        .collect();
+
+    entries.sort_by(|a, b| match (a.is_dir, b.is_dir) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+    });
+
+    Ok(entries)
+}
+
+// ── Editor management ──
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct EditorInfo {
+    id: String,
+    name: String,
+    command: String,
+}
+
+fn is_in_path(cmd: &str) -> bool {
+    let mut check = std::process::Command::new(if cfg!(windows) { "where" } else { "which" });
+    check.arg(cmd);
+    check.stdout(std::process::Stdio::null());
+    check.stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        check.creation_flags(CREATE_NO_WINDOW);
+    }
+    check.status().map(|s| s.success()).unwrap_or(false)
+}
+
+/// Detect available code editors on the system.
+#[tauri::command]
+async fn detect_editors() -> Vec<EditorInfo> {
+    let candidates = [
+        ("vscode", "VS Code", "code"),
+        ("cursor", "Cursor", "cursor"),
+        ("sublime", "Sublime Text", "subl"),
+        ("neovim", "Neovim", "nvim"),
+        ("antigravity", "Antigravity", "antigravity"),
+    ];
+
+    candidates
+        .iter()
+        .filter(|(_, _, cmd)| is_in_path(cmd))
+        .map(|(id, name, cmd)| EditorInfo {
+            id: id.to_string(),
+            name: name.to_string(),
+            command: cmd.to_string(),
+        })
+        .collect()
+}
+
+/// Verify that the Claude CLI is accessible and return its version string.
+#[tauri::command]
+async fn check_claude_cli(custom_path: Option<String>) -> Result<String, String> {
+    let cmd_name = custom_path.as_deref().unwrap_or("claude");
+    let mut cmd = std::process::Command::new(cmd_name);
+    cmd.arg("--version");
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let output = cmd.output().map_err(|e| format!("not found: {}", e))?;
+    if output.status.success() {
+        let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        Ok(if version.is_empty() { "found".to_string() } else { version })
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Err(if stderr.is_empty() { "unknown error".to_string() } else { stderr })
+    }
+}
+
+/// Open a file in the preferred editor, with the project folder as workspace.
+#[tauri::command]
+async fn open_in_editor(editor: String, file: String, cwd: String) -> Result<(), String> {
+    let result = match editor.as_str() {
+        "vscode" => std::process::Command::new("code")
+            .args(["--reuse-window", &cwd, "--goto", &file])
+            .spawn(),
+        "cursor" => std::process::Command::new("cursor")
+            .args(["--reuse-window", &cwd, "--goto", &file])
+            .spawn(),
+        "sublime" => std::process::Command::new("subl")
+            .args([&cwd, &file])
+            .spawn(),
+        "neovim" => {
+            if is_in_path("wt") {
+                std::process::Command::new("wt")
+                    .args(["-d", &cwd, "nvim", &file])
+                    .spawn()
+            } else {
+                std::process::Command::new("cmd")
+                    .args([
+                        "/c", "start", "cmd", "/k",
+                        &format!("cd /d \"{}\" && nvim \"{}\"", cwd, file),
+                    ])
+                    .spawn()
+            }
+        }
+        "antigravity" => std::process::Command::new("antigravity")
+            .args([&cwd, "--goto", &file])
+            .spawn(),
+        _ => return Err(format!("Unknown editor: {}", editor)),
+    };
+
+    result.map_err(|e| format!("Failed to open editor: {}", e))?;
+    Ok(())
 }
 
 pub fn run() {
@@ -584,7 +817,7 @@ pub fn run() {
         .manage(AppState {
             tabs: Arc::new(Mutex::new(HashMap::new())),
         })
-        .invoke_handler(tauri::generate_handler![send_prompt, stop_claude, steer_claude, save_clipboard_image, list_slash_commands, cleanup_clipboard, generate_title, list_mcp_servers, add_mcp_server, remove_mcp_server, list_hooks, add_hook, remove_hook, storage_read, storage_write, storage_delete, get_cli_mode])
+        .invoke_handler(tauri::generate_handler![send_prompt, stop_claude, steer_claude, save_clipboard_image, list_slash_commands, cleanup_clipboard, generate_title, list_agents, list_mcp_servers, add_mcp_server, remove_mcp_server, list_hooks, add_hook, remove_hook, storage_read, storage_write, storage_delete, get_cli_mode, list_directory, detect_editors, open_in_editor, check_claude_cli])
         .run(tauri::generate_context!())
         .expect("error while running clauke");
 }

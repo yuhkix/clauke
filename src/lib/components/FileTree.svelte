@@ -1,81 +1,134 @@
 <script lang="ts">
-  import { untrack } from "svelte";
-  import type { TreeNode } from "../types";
+  import { invoke } from "@tauri-apps/api/core";
+  import type { FileStats } from "../types";
 
   let {
-    tree,
+    cwd,
     open,
     onToggle,
+    fileStats,
   }: {
-    tree: TreeNode[];
+    cwd: string;
     open: boolean;
     onToggle: () => void;
+    fileStats?: Map<string, FileStats>;
   } = $props();
 
-  let expanded = $state<Set<string>>(new Set());
-
-  function toggleDir(name: string) {
-    const next = new Set(expanded);
-    if (next.has(name)) next.delete(name);
-    else next.add(name);
-    expanded = next;
+  interface FsEntry {
+    name: string;
+    path: string;
+    is_dir: boolean;
+    size: number;
+    extension: string | null;
   }
 
-  // Auto-expand directories with changes (additive, won't collapse user-toggled dirs)
-  let prevAutoKeys = new Set<string>();
+  let rootEntries = $state<FsEntry[]>([]);
+  let childrenCache = $state<Map<string, FsEntry[]>>(new Map());
+  let expanded = $state<Set<string>>(new Set());
+  let loadedDirs = $state<Set<string>>(new Set());
+  let loading = $state<Set<string>>(new Set());
+
+  let projectName = $derived(
+    cwd ? cwd.replace(/\\/g, "/").split("/").pop() || "" : "",
+  );
+
+  // Reload root when cwd changes
+  let prevCwd = "";
   $effect(() => {
-    const toExpand = new Set<string>();
-    function walk(nodes: TreeNode[], prefix: string) {
-      for (const node of nodes) {
-        const key = prefix + node.name;
-        if (node.isDir && (node.totalAdded > 0 || node.totalRemoved > 0)) {
-          toExpand.add(key);
-        }
-        if (node.children.length > 0) {
-          walk(node.children, key + "/");
-        }
-      }
-    }
-    walk(tree, "");
-    // Only expand keys we haven't seen before
-    const newKeys: string[] = [];
-    for (const k of toExpand) {
-      if (!prevAutoKeys.has(k)) newKeys.push(k);
-    }
-    prevAutoKeys = toExpand;
-    if (newKeys.length > 0) {
-      untrack(() => {
-        const next = new Set(expanded);
-        for (const k of newKeys) next.add(k);
-        expanded = next;
-      });
+    if (cwd && cwd !== prevCwd) {
+      prevCwd = cwd;
+      expanded = new Set();
+      childrenCache = new Map();
+      loadedDirs = new Set();
+      loadDir(cwd, true);
+    } else if (!cwd) {
+      rootEntries = [];
     }
   });
 
-  const totalFiles = $derived(countFiles(tree));
-  const totalAdded = $derived(tree.reduce((s, n) => s + n.totalAdded, 0));
-  const totalRemoved = $derived(tree.reduce((s, n) => s + n.totalRemoved, 0));
-
-  function countFiles(nodes: TreeNode[]): number {
-    let count = 0;
-    for (const n of nodes) {
-      if (!n.isDir) count++;
-      count += countFiles(n.children);
+  async function loadDir(path: string, isRoot = false) {
+    loading = new Set(loading).add(path);
+    try {
+      const entries: FsEntry[] = await invoke("list_directory", { path });
+      if (isRoot) {
+        rootEntries = entries;
+      } else {
+        childrenCache = new Map(childrenCache).set(path, entries);
+      }
+      loadedDirs = new Set(loadedDirs).add(path);
+    } catch {
+      if (isRoot) rootEntries = [];
     }
-    return count;
+    const next = new Set(loading);
+    next.delete(path);
+    loading = next;
+  }
+
+  async function toggleDir(entry: FsEntry) {
+    const key = entry.path;
+    const next = new Set(expanded);
+    if (next.has(key)) {
+      next.delete(key);
+    } else {
+      next.add(key);
+      if (!loadedDirs.has(key)) {
+        await loadDir(key);
+      }
+    }
+    expanded = next;
+  }
+
+  async function openFile(entry: FsEntry) {
+    const editor = localStorage.getItem("clauke:editor") || "";
+    if (!editor) return;
+    try {
+      await invoke("open_in_editor", { editor, file: entry.path, cwd });
+    } catch { /* silently fail */ }
+  }
+
+  function refresh() {
+    childrenCache = new Map();
+    loadedDirs = new Set();
+    const wasExpanded = new Set(expanded);
+    expanded = new Set();
+    loadDir(cwd, true).then(() => {
+      // Re-expand previously expanded dirs
+      expanded = wasExpanded;
+      for (const dir of wasExpanded) {
+        loadDir(dir);
+      }
+    });
+  }
+
+  function getStats(path: string): FileStats | undefined {
+    if (!fileStats) return undefined;
+    // Try exact match, then try with normalized separators
+    return fileStats.get(path) || fileStats.get(path.replace(/\//g, "\\"));
+  }
+
+  function getChildren(path: string): FsEntry[] {
+    return childrenCache.get(path) || [];
+  }
+
+  function formatSize(bytes: number): string {
+    if (bytes < 1024) return `${bytes}B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)}K`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)}M`;
   }
 </script>
 
-{#snippet treeNodes(nodes: TreeNode[], prefix: string, depth: number)}
-  {#each nodes as node}
-    {@const key = prefix + node.name}
-    {@const isExpanded = expanded.has(key)}
-    {#if node.isDir}
+{#snippet treeNodes(entries: FsEntry[], depth: number)}
+  {#each entries as entry}
+    {@const isExpanded = expanded.has(entry.path)}
+    {@const isLoading = loading.has(entry.path)}
+    {@const stats = getStats(entry.path)}
+    {@const hasChanges = stats && (stats.added > 0 || stats.removed > 0)}
+    {#if entry.is_dir}
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="tree-item dir"
         style:padding-left="{12 + depth * 14}px"
-        onclick={() => toggleDir(key)}
+        onclick={() => toggleDir(entry)}
       >
         <svg class="chevron" class:open={isExpanded} width="10" height="10" viewBox="0 0 10 10">
           <polyline points="3,2 7,5 3,8" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
@@ -83,35 +136,35 @@
         <svg class="icon-dir" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
           <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
         </svg>
-        <span class="name">{node.name}</span>
-        {#if node.totalAdded > 0 || node.totalRemoved > 0}
-          <span class="diff-stats">
-            {#if node.totalAdded > 0}<span class="diff-add">+{node.totalAdded}</span>{/if}
-            {#if node.totalRemoved > 0}<span class="diff-rm">-{node.totalRemoved}</span>{/if}
-          </span>
+        <span class="name">{entry.name}</span>
+        {#if isLoading}
+          <span class="loading-dot"></span>
         {/if}
       </div>
       {#if isExpanded}
-        {@render treeNodes(node.children, key + "/", depth + 1)}
+        {@render treeNodes(getChildren(entry.path), depth + 1)}
       {/if}
     {:else}
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="tree-item file"
-        class:modified={node.stats && (node.stats.added > 0 || node.stats.removed > 0)}
-        class:read-only={node.stats && node.stats.reads > 0 && node.stats.writes === 0}
+        class:modified={hasChanges}
         style:padding-left="{12 + depth * 14 + 14}px"
-        title={node.fullPath}
+        title="{entry.path}{stats ? ` (${stats.reads}R ${stats.writes}W)` : ''}"
+        onclick={() => openFile(entry)}
       >
         <svg class="icon-file" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
           <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
           <polyline points="14 2 14 8 20 8" />
         </svg>
-        <span class="name">{node.name}</span>
-        {#if node.stats && (node.stats.added > 0 || node.stats.removed > 0)}
+        <span class="name">{entry.name}</span>
+        {#if hasChanges}
           <span class="diff-stats">
-            {#if node.stats.added > 0}<span class="diff-add">+{node.stats.added}</span>{/if}
-            {#if node.stats.removed > 0}<span class="diff-rm">-{node.stats.removed}</span>{/if}
+            {#if stats && stats.added > 0}<span class="diff-add">+{stats.added}</span>{/if}
+            {#if stats && stats.removed > 0}<span class="diff-rm">-{stats.removed}</span>{/if}
           </span>
+        {:else}
+          <span class="file-size">{formatSize(entry.size)}</span>
         {/if}
       </div>
     {/if}
@@ -125,24 +178,21 @@
     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
       <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
     </svg>
-    {#if totalFiles > 0}
-      <span class="tab-count">{totalFiles}</span>
-    {/if}
   </div>
 {/if}
 
-{#if open && tree.length > 0}
+{#if open}
   <div class="filetree-panel">
     <div class="panel-header">
-      <span class="panel-title">files</span>
+      <span class="panel-title">{projectName || "files"}</span>
       <div class="panel-header-right">
-        {#if totalAdded > 0 || totalRemoved > 0}
-          <span class="total-diff">
-            {#if totalAdded > 0}<span class="diff-add">+{totalAdded}</span>{/if}
-            {#if totalRemoved > 0}<span class="diff-rm">-{totalRemoved}</span>{/if}
-          </span>
-        {/if}
-        <button class="close-btn" onclick={onToggle} title="Close file tree">
+        <button class="icon-btn" onclick={refresh} title="Refresh">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="23 4 23 10 17 10" /><polyline points="1 20 1 14 7 14" />
+            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+          </svg>
+        </button>
+        <button class="icon-btn" onclick={onToggle} title="Close file tree">
           <svg width="10" height="10" viewBox="0 0 10 10">
             <line x1="2" y1="2" x2="8" y2="8" stroke="currentColor" stroke-width="1.2" />
             <line x1="8" y1="2" x2="2" y2="8" stroke="currentColor" stroke-width="1.2" />
@@ -151,8 +201,19 @@
       </div>
     </div>
     <div class="tree-scroll">
-      {@render treeNodes(tree, "", 0)}
+      {#if !cwd}
+        <div class="empty-msg">no working directory set</div>
+      {:else if rootEntries.length === 0 && loading.size > 0}
+        <div class="empty-msg">loading...</div>
+      {:else if rootEntries.length === 0}
+        <div class="empty-msg">empty directory</div>
+      {:else}
+        {@render treeNodes(rootEntries, 0)}
+      {/if}
     </div>
+    {#if !localStorage.getItem("clauke:editor")}
+      <div class="no-editor-hint">set preferred editor in settings to open files</div>
+    {/if}
   </div>
 {/if}
 
@@ -185,23 +246,15 @@
     border-color: var(--border);
   }
 
-  .tab-count {
-    font-family: var(--font-mono);
-    font-size: 9px;
-    font-weight: 600;
-    color: var(--text-tertiary);
-    writing-mode: horizontal-tb;
-  }
-
   .filetree-panel {
     position: absolute;
     left: 12px;
     top: 12px;
     bottom: 12px;
     width: 260px;
-    background: rgba(255, 255, 255, 0.06);
-    -webkit-backdrop-filter: blur(40px) saturate(1.3);
-    backdrop-filter: blur(40px) saturate(1.3);
+    background: var(--glass-panel-bg);
+    -webkit-backdrop-filter: var(--glass-panel-blur);
+    backdrop-filter: var(--glass-panel-blur);
     border: 1px solid var(--border);
     border-radius: var(--radius-md);
     display: flex;
@@ -209,7 +262,6 @@
     z-index: 9;
     animation: slideIn 0.25s var(--ease-out-expo);
     overflow: hidden;
-    will-change: backdrop-filter;
   }
 
   @keyframes slideIn {
@@ -229,7 +281,7 @@
   .panel-header-right {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 4px;
   }
 
   .panel-title {
@@ -240,9 +292,12 @@
     letter-spacing: 0.8px;
     color: var(--text-tertiary);
     opacity: 0.6;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
-  .close-btn {
+  .icon-btn {
     display: flex;
     align-items: center;
     justify-content: center;
@@ -256,19 +311,10 @@
     transition: all 0.2s var(--ease-out-quart);
     opacity: 0.4;
   }
-  .close-btn:hover {
+  .icon-btn:hover {
     color: var(--text-secondary);
     background: rgba(255, 255, 255, 0.06);
     opacity: 1;
-    transform: rotate(90deg);
-  }
-
-  .total-diff {
-    display: flex;
-    gap: 6px;
-    font-family: var(--font-mono);
-    font-size: 10px;
-    font-weight: 500;
   }
 
   .tree-scroll {
@@ -295,6 +341,14 @@
 
   .tree-item.dir {
     cursor: pointer;
+  }
+
+  .tree-item.file {
+    cursor: pointer;
+  }
+
+  .tree-item.file:hover {
+    background: rgba(255, 255, 255, 0.06);
   }
 
   .chevron {
@@ -325,10 +379,6 @@
     opacity: 0.8;
   }
 
-  .tree-item.read-only .icon-file {
-    opacity: 0.3;
-  }
-
   .name {
     font-family: var(--font-mono);
     font-size: 11px;
@@ -344,9 +394,17 @@
     font-weight: 450;
   }
 
-  .tree-item.read-only .name {
+  .tree-item.modified .name {
+    color: rgba(200, 180, 255, 0.9);
+  }
+
+  .file-size {
+    font-family: var(--font-mono);
+    font-size: 9px;
     color: var(--text-tertiary);
-    opacity: 0.6;
+    opacity: 0.35;
+    flex-shrink: 0;
+    margin-left: auto;
   }
 
   .diff-stats {
@@ -368,13 +426,56 @@
     color: rgba(255, 100, 100, 0.75);
   }
 
+  .loading-dot {
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: var(--text-tertiary);
+    opacity: 0.4;
+    animation: pulse 1s ease-in-out infinite;
+    flex-shrink: 0;
+    margin-left: auto;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 0.2; }
+    50% { opacity: 0.6; }
+  }
+
+  .empty-msg {
+    padding: 16px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-tertiary);
+    opacity: 0.5;
+    text-align: center;
+  }
+
+  .no-editor-hint {
+    padding: 6px 14px;
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    color: var(--text-tertiary);
+    opacity: 0.4;
+    border-top: 1px solid var(--border-subtle);
+    text-align: center;
+  }
+
   :global([data-theme="light"]) .filetree-panel {
-    background: var(--bg-glass);
+    background: var(--glass-panel-bg);
     box-shadow: 0 8px 40px rgba(0, 0, 0, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.5);
   }
 
   :global([data-theme="light"]) .filetree-tab {
     background: rgba(255, 255, 255, 0.6);
+  }
+
+  :global([data-theme="light"]) .tree-item:hover {
+    background: rgba(0, 0, 0, 0.04);
+  }
+
+  :global([data-theme="light"]) .tree-item.file:hover {
+    background: rgba(0, 0, 0, 0.06);
   }
 
   :global([data-theme="light"]) .diff-add {
@@ -383,5 +484,9 @@
 
   :global([data-theme="light"]) .diff-rm {
     color: rgba(210, 50, 50, 0.85);
+  }
+
+  :global([data-theme="light"]) .icon-btn:hover {
+    background: rgba(0, 0, 0, 0.06);
   }
 </style>

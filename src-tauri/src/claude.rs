@@ -31,8 +31,12 @@ impl ClaudeRunner {
         skip_permissions: bool,
         allowed_tools: Option<&[String]>,
         system_prompt: Option<&str>,
+        add_dirs: &[String],
+        agent: Option<&str>,
+        continue_last: bool,
+        claude_path: Option<&str>,
     ) -> Result<Self, std::io::Error> {
-        let mut cmd = Command::new("claude");
+        let mut cmd = Command::new(claude_path.unwrap_or("claude"));
         cmd.args([
             "--output-format",
             "stream-json",
@@ -52,8 +56,16 @@ impl ClaudeRunner {
                 cmd.args(["--append-system-prompt", sp]);
             }
         }
-        if let Some(session_id) = resume {
+        if continue_last && resume.is_none() {
+            cmd.arg("--continue");
+        } else if let Some(session_id) = resume {
             cmd.args(["--resume", session_id]);
+        }
+        for dir in add_dirs {
+            cmd.args(["--add-dir", dir]);
+        }
+        if let Some(a) = agent {
+            cmd.args(["--agent", a]);
         }
         // Claude CLI has no --image flag. Instead, mention image paths in the
         // prompt so Claude can read them via its Read tool.

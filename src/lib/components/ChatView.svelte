@@ -6,6 +6,7 @@
   let {
     messages,
     isRunning,
+    runStartTime,
     autoScrollEnabled = true,
     onFork,
     onCopy,
@@ -13,11 +14,34 @@
   }: {
     messages: ChatMessage[];
     isRunning: boolean;
+    runStartTime?: number;
     autoScrollEnabled?: boolean;
     onFork?: (messageId: string) => void;
     onCopy?: (messageId: string) => void;
     onEditMessage?: (messageId: string) => void;
   } = $props();
+
+  // Elapsed timer
+  let elapsed = $state(0);
+  let timerInterval: ReturnType<typeof setInterval> | undefined;
+
+  $effect(() => {
+    if (isRunning && runStartTime) {
+      elapsed = Math.floor((Date.now() - runStartTime) / 1000);
+      timerInterval = setInterval(() => {
+        elapsed = Math.floor((Date.now() - runStartTime) / 1000);
+      }, 1000);
+    } else {
+      clearInterval(timerInterval);
+    }
+    return () => clearInterval(timerInterval);
+  });
+
+  function formatElapsed(s: number): string {
+    const m = Math.floor(s / 60);
+    const sec = s % 60;
+    return `${m}:${sec.toString().padStart(2, "0")}`;
+  }
 
   let scrollContainer: HTMLDivElement;
   let userScrolledUp = $state(false);
@@ -77,7 +101,7 @@
     </div>
   {:else}
     <div class="messages">
-      {#each messages as message (message.id)}
+      {#each messages as message, i (message.id)}
         {#if message.role === "system"}
           <div class="system-divider" id={message.id}>
             <div class="system-line"></div>
@@ -93,15 +117,19 @@
             <div class="system-line"></div>
           </div>
         {:else}
-          <MessageBubble {message} {onFork} {onCopy} onEdit={onEditMessage} />
+          <MessageBubble {message} {onFork} {onCopy} onEdit={onEditMessage} isStreaming={isRunning && i === messages.length - 1 && message.role === 'assistant'} />
         {/if}
       {/each}
 
       {#if isRunning}
-        <div class="thinking">
-          <span class="dot"></span>
-          <span class="dot"></span>
-          <span class="dot"></span>
+        <div class="thinking-indicator">
+          <div class="think-orbit">
+            <span class="orb orb-1"></span>
+            <span class="orb orb-2"></span>
+            <span class="orb orb-3"></span>
+            <span class="orbit-trail"></span>
+          </div>
+          <span class="think-timer">{formatElapsed(elapsed)}</span>
         </div>
       {/if}
     </div>
@@ -184,25 +212,141 @@
     margin: 0 auto;
   }
 
-  .thinking {
+  /* ── Thinking indicator: waveform + timer ── */
+  .thinking-indicator {
     display: flex;
-    gap: 5px;
-    padding: 16px 2px;
+    align-items: center;
+    gap: 10px;
+    padding: 14px 2px;
+    animation: thinkFadeIn 0.4s var(--ease-out-expo);
   }
 
-  .dot {
-    width: 4px;
-    height: 4px;
+  @keyframes thinkFadeIn {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  /* ── Orbital animation ── */
+  .think-orbit {
+    position: relative;
+    width: 42px;
+    height: 28px;
+  }
+
+  .orb {
+    position: absolute;
     border-radius: 50%;
-    background: var(--text-tertiary);
-    animation: dotPulse 1.4s var(--ease-in-out) infinite;
+    will-change: transform, opacity;
   }
-  .dot:nth-child(2) { animation-delay: 0.15s; }
-  .dot:nth-child(3) { animation-delay: 0.3s; }
 
-  @keyframes dotPulse {
-    0%, 100% { opacity: 0.2; transform: scale(0.8); }
-    50% { opacity: 0.9; transform: scale(1.2); }
+  /* Main orb — elliptical orbit, Kepler-style: fast near center, slow at edges */
+  .orb-1 {
+    width: 6px;
+    height: 6px;
+    background: radial-gradient(circle, rgba(167, 139, 250, 1), rgba(129, 100, 230, 0.6));
+    box-shadow: 0 0 12px 3px rgba(167, 139, 250, 0.5), 0 0 24px 5px rgba(167, 139, 250, 0.15);
+    top: 50%;
+    left: 50%;
+    animation: orbit1 3s linear infinite;
+  }
+
+  /* Second orb — counter-orbit */
+  .orb-2 {
+    width: 5px;
+    height: 5px;
+    background: radial-gradient(circle, rgba(130, 170, 255, 0.95), rgba(100, 140, 230, 0.5));
+    box-shadow: 0 0 10px 2px rgba(130, 170, 255, 0.45), 0 0 20px 4px rgba(130, 170, 255, 0.12);
+    top: 50%;
+    left: 50%;
+    animation: orbit2 3s linear infinite;
+  }
+
+  /* Third orb — fast inner orbit */
+  .orb-3 {
+    width: 3.5px;
+    height: 3.5px;
+    background: radial-gradient(circle, rgba(200, 180, 255, 0.95), rgba(170, 150, 230, 0.4));
+    box-shadow: 0 0 8px 2px rgba(200, 180, 255, 0.4);
+    top: 50%;
+    left: 50%;
+    animation: orbit3 2s linear infinite;
+  }
+
+  /* Faint ring trail */
+  .orbit-trail {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 30px;
+    height: 18px;
+    transform: translate(-50%, -50%);
+    border: 1px solid rgba(167, 139, 250, 0.07);
+    border-radius: 50%;
+    animation: trailPulse 3s linear infinite;
+  }
+
+  /* Kepler orbit: positions bunch up at far edges (slow), spread out near center (fast).
+     12 keyframes for smooth continuous motion. */
+  @keyframes orbit1 {
+    0%      { transform: translate(calc(-50% + 16px), calc(-50% + 0px));  opacity: 0.95; }
+    8.33%   { transform: translate(calc(-50% + 13px), calc(-50% - 7px)); opacity: 0.85; }
+    16.67%  { transform: translate(calc(-50% + 5px),  calc(-50% - 10px)); opacity: 0.75; }
+    25%     { transform: translate(calc(-50% - 3px),  calc(-50% - 9px));  opacity: 0.7; }
+    33.33%  { transform: translate(calc(-50% - 10px), calc(-50% - 5px)); opacity: 0.75; }
+    41.67%  { transform: translate(calc(-50% - 14px), calc(-50% + 0px));  opacity: 0.85; }
+    50%     { transform: translate(calc(-50% - 14px), calc(-50% + 2px));  opacity: 0.9; }
+    58.33%  { transform: translate(calc(-50% - 10px), calc(-50% + 7px)); opacity: 0.85; }
+    66.67%  { transform: translate(calc(-50% - 3px),  calc(-50% + 10px)); opacity: 0.75; }
+    75%     { transform: translate(calc(-50% + 5px),  calc(-50% + 9px));  opacity: 0.7; }
+    83.33%  { transform: translate(calc(-50% + 13px), calc(-50% + 5px)); opacity: 0.8; }
+    91.67%  { transform: translate(calc(-50% + 16px), calc(-50% + 2px)); opacity: 0.9; }
+    100%    { transform: translate(calc(-50% + 16px), calc(-50% + 0px));  opacity: 0.95; }
+  }
+
+  @keyframes orbit2 {
+    0%      { transform: translate(calc(-50% - 13px), calc(-50% + 2px));  opacity: 0.9; }
+    8.33%   { transform: translate(calc(-50% - 11px), calc(-50% - 5px)); opacity: 0.8; }
+    16.67%  { transform: translate(calc(-50% - 4px),  calc(-50% - 9px)); opacity: 0.7; }
+    25%     { transform: translate(calc(-50% + 4px),  calc(-50% - 8px));  opacity: 0.75; }
+    33.33%  { transform: translate(calc(-50% + 10px), calc(-50% - 4px)); opacity: 0.85; }
+    41.67%  { transform: translate(calc(-50% + 13px), calc(-50% + 1px));  opacity: 0.95; }
+    50%     { transform: translate(calc(-50% + 12px), calc(-50% + 4px));  opacity: 0.9; }
+    58.33%  { transform: translate(calc(-50% + 8px),  calc(-50% + 8px)); opacity: 0.8; }
+    66.67%  { transform: translate(calc(-50% + 1px),  calc(-50% + 9px)); opacity: 0.7; }
+    75%     { transform: translate(calc(-50% - 6px),  calc(-50% + 8px));  opacity: 0.75; }
+    83.33%  { transform: translate(calc(-50% - 11px), calc(-50% + 5px)); opacity: 0.85; }
+    91.67%  { transform: translate(calc(-50% - 13px), calc(-50% + 3px)); opacity: 0.9; }
+    100%    { transform: translate(calc(-50% - 13px), calc(-50% + 2px));  opacity: 0.9; }
+  }
+
+  @keyframes orbit3 {
+    0%      { transform: translate(calc(-50% + 7px),  calc(-50% - 1px)); opacity: 0.8; }
+    8.33%   { transform: translate(calc(-50% + 5px),  calc(-50% - 5px)); opacity: 0.7; }
+    16.67%  { transform: translate(calc(-50% + 0px),  calc(-50% - 6px)); opacity: 0.65; }
+    25%     { transform: translate(calc(-50% - 5px),  calc(-50% - 4px)); opacity: 0.7; }
+    33.33%  { transform: translate(calc(-50% - 7px),  calc(-50% + 0px)); opacity: 0.8; }
+    41.67%  { transform: translate(calc(-50% - 6px),  calc(-50% + 4px)); opacity: 0.85; }
+    50%     { transform: translate(calc(-50% - 3px),  calc(-50% + 6px)); opacity: 0.9; }
+    58.33%  { transform: translate(calc(-50% + 1px),  calc(-50% + 6px)); opacity: 0.85; }
+    66.67%  { transform: translate(calc(-50% + 5px),  calc(-50% + 4px)); opacity: 0.75; }
+    75%     { transform: translate(calc(-50% + 7px),  calc(-50% + 1px)); opacity: 0.7; }
+    83.33%  { transform: translate(calc(-50% + 7px),  calc(-50% - 2px)); opacity: 0.75; }
+    91.67%  { transform: translate(calc(-50% + 6px),  calc(-50% - 4px)); opacity: 0.7; }
+    100%    { transform: translate(calc(-50% + 7px),  calc(-50% - 1px)); opacity: 0.8; }
+  }
+
+  @keyframes trailPulse {
+    0%, 100% { opacity: 0.25; transform: translate(-50%, -50%) scale(1); }
+    50% { opacity: 0.55; transform: translate(-50%, -50%) scale(1.1); }
+  }
+
+  .think-timer {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 450;
+    color: var(--text-tertiary);
+    letter-spacing: 0.5px;
+    font-variant-numeric: tabular-nums;
   }
 
   /* ── System divider (compact notification, etc.) ── */

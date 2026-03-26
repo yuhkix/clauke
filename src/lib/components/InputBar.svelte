@@ -1,6 +1,6 @@
 <script lang="ts">
   import { convertFileSrc, invoke } from "@tauri-apps/api/core";
-  import type { ClaudeModel, EffortLevel, PermissionMode, SlashCommand } from "../types";
+  import type { ClaudeModel, EffortLevel, PermissionMode, SlashCommand, AgentInfo } from "../types";
   import { MODEL_LABELS, EFFORT_LABELS, PERMISSION_LABELS, BUILTIN_COMMANDS } from "../types";
 
   let {
@@ -18,6 +18,8 @@
     onToggleSystemPrompt,
     prefill = "",
     onPrefillConsumed,
+    agent = $bindable<string | undefined>(undefined),
+    agents = [],
   }: {
     onSend: (prompt: string, images: string[]) => void;
     onSteer: (message: string) => void;
@@ -35,6 +37,10 @@
     /** Pre-fill the input with this text (e.g., from edit & resend) */
     prefill?: string;
     onPrefillConsumed?: () => void;
+    /** Selected agent name */
+    agent?: string;
+    /** Available agents from `claude agents` */
+    agents?: AgentInfo[];
   } = $props();
 
   let input = $state("");
@@ -54,6 +60,7 @@
   let modelOpen = $state(false);
   let effortOpen = $state(false);
   let permOpen = $state(false);
+  let agentOpen = $state(false);
   let attachedImages = $state<string[]>([]);
   let fileInput: HTMLInputElement;
 
@@ -232,7 +239,7 @@
     autoResize();
     // Show command menu when typing a /word anywhere in input
     slashQuery = getSlashQuery();
-    if (slashQuery && !isRunning) {
+    if (slashQuery) {
       showCommands = true;
       selectedCommandIdx = 0;
     } else {
@@ -261,12 +268,18 @@
     permOpen = false;
   }
 
+  function selectAgent(a: string | undefined) {
+    agent = a;
+    agentOpen = false;
+  }
+
   function handleClickOutside(e: MouseEvent) {
     const target = e.target as HTMLElement;
     if (!target.closest(".dropdown")) {
       modelOpen = false;
       effortOpen = false;
       permOpen = false;
+      agentOpen = false;
     }
     if (!target.closest(".island-inner")) {
       showCommands = false;
@@ -414,6 +427,8 @@
               e.stopPropagation();
               modelOpen = !modelOpen;
               effortOpen = false;
+              permOpen = false;
+              agentOpen = false;
             }}
           >
             <svg
@@ -470,6 +485,8 @@
               e.stopPropagation();
               effortOpen = !effortOpen;
               modelOpen = false;
+              permOpen = false;
+              agentOpen = false;
             }}
           >
             <span>{EFFORT_LABELS[effort]}</span>
@@ -513,6 +530,7 @@
               permOpen = !permOpen;
               modelOpen = false;
               effortOpen = false;
+              agentOpen = false;
             }}
           >
             {#if permissionMode === "bypass"}
@@ -560,6 +578,67 @@
             </div>
           {/if}
         </div>
+
+        <!-- Agent selector (only if agents are available) -->
+        {#if agents && agents.length > 0}
+          <span class="separator"></span>
+          <div class="dropdown">
+            <button
+              class="chip"
+              class:chip-agent={!!agent}
+              onclick={(e: MouseEvent) => {
+                e.stopPropagation();
+                agentOpen = !agentOpen;
+                modelOpen = false;
+                effortOpen = false;
+                permOpen = false;
+              }}
+            >
+              <svg class="chip-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="8" r="4" />
+                <path d="M20 21a8 8 0 0 0-16 0" />
+              </svg>
+              <span>{agent || "Agent"}</span>
+              <svg
+                class="chevron"
+                width="10"
+                height="10"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2.5"><path d="M6 9l6 6 6-6" /></svg
+              >
+            </button>
+            {#if agentOpen}
+              <div class="dropdown-menu agent-menu">
+                <button
+                  class="dropdown-item"
+                  class:active={!agent}
+                  onclick={(e: MouseEvent) => {
+                    e.stopPropagation();
+                    selectAgent(undefined);
+                  }}
+                >
+                  <span class="agent-name">None</span>
+                  <span class="agent-detail">default Claude</span>
+                </button>
+                {#each agents as a}
+                  <button
+                    class="dropdown-item"
+                    class:active={a.name === agent}
+                    onclick={(e: MouseEvent) => {
+                      e.stopPropagation();
+                      selectAgent(a.name);
+                    }}
+                  >
+                    <span class="agent-name">{a.name}</span>
+                    <span class="agent-detail">{a.model}{a.source ? ` \u00b7 ${a.source}` : ""}</span>
+                  </button>
+                {/each}
+              </div>
+            {/if}
+          </div>
+        {/if}
       </div>
 
       <div class="controls-right">
@@ -704,9 +783,9 @@
     margin-bottom: 6px;
     max-height: 280px;
     overflow-y: auto;
-    background: rgba(30, 30, 34, 0.72);
-    backdrop-filter: blur(40px) saturate(1.3);
-    -webkit-backdrop-filter: blur(40px) saturate(1.3);
+    background: var(--glass-panel-bg);
+    backdrop-filter: var(--glass-panel-blur);
+    -webkit-backdrop-filter: var(--glass-panel-blur);
     border: 1px solid rgba(255, 255, 255, 0.08);
     border-radius: 14px;
     padding: 4px;
@@ -872,9 +951,9 @@
     position: absolute;
     bottom: calc(100% + 6px);
     left: 0;
-    background: rgba(30, 30, 34, 0.72);
-    backdrop-filter: blur(40px) saturate(1.3);
-    -webkit-backdrop-filter: blur(40px) saturate(1.3);
+    background: var(--glass-panel-bg);
+    backdrop-filter: var(--glass-panel-blur);
+    -webkit-backdrop-filter: var(--glass-panel-blur);
     border: 1px solid rgba(255, 255, 255, 0.08);
     border-radius: 12px;
     padding: 4px;
@@ -1109,5 +1188,41 @@
   .image-remove:hover {
     background: rgba(220, 60, 60, 0.8);
     color: #fff;
+  }
+
+  /* ── Agent selector ── */
+  .chip-agent {
+    color: rgba(96, 165, 250, 0.85);
+  }
+  .chip-agent .chip-icon {
+    opacity: 0.85;
+  }
+
+  .agent-menu {
+    min-width: 200px;
+    max-height: 280px;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.08) transparent;
+  }
+
+  .agent-menu .dropdown-item {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1px;
+    padding: 8px 12px;
+  }
+
+  .agent-name {
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    font-weight: 500;
+  }
+
+  .agent-detail {
+    font-size: 10.5px;
+    color: var(--text-tertiary);
+    opacity: 0.7;
   }
 </style>

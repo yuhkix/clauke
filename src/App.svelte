@@ -17,8 +17,8 @@
   import FileTree from "./lib/components/FileTree.svelte";
   import ShortcutHelp from "./lib/components/ShortcutHelp.svelte";
   import SearchOverlay from "./lib/components/SearchOverlay.svelte";
-  import type { ChatMessage, ClaudeEvent, Tab, SlashCommand, ToolCall, SessionRecord, TokenUsage, PermissionMode, TodoItem } from "./lib/types";
-  import { BUILTIN_COMMANDS, MAX_SESSION_HISTORY, emptyUsage, addUsage, formatTokens, PERMISSION_TOOL_SETS, extractTodos, extractFileStats, buildFileTree, MODEL_CONTEXT_LIMITS } from "./lib/types";
+  import type { ChatMessage, ClaudeEvent, Tab, SlashCommand, ToolCall, SessionRecord, TokenUsage, PermissionMode, TodoItem, AgentInfo } from "./lib/types";
+  import { BUILTIN_COMMANDS, MAX_SESSION_HISTORY, emptyUsage, addUsage, formatTokens, calculateCost, formatCost, PERMISSION_TOOL_SETS, extractTodos, extractFileStats, MODEL_CONTEXT_LIMITS } from "./lib/types";
   import { processClaudeEvent, cleanupTabState } from "./lib/claude";
 
   let settingsOpen = $state(false);
@@ -40,6 +40,7 @@
     description?: string;
   } | null>(null);
   let allCommands = $state<SlashCommand[]>(BUILTIN_COMMANDS);
+  let agentList = $state<AgentInfo[]>([]);
   let autoScrollEnabled = $state(
     localStorage.getItem("clauke:autoScroll") !== "false",
   );
@@ -80,7 +81,7 @@
     tabCounter++;
     return {
       id: `tab-${tabCounter}-${Date.now()}`,
-      name: "neuer tab",
+      name: "new tab",
       messages: [],
       isRunning: false,
       cwd: localStorage.getItem("clauke:defaultCwd") || "",
@@ -111,6 +112,8 @@
           permissionMode: t.permissionMode || "bypass",
           contextTokens: t.contextTokens || undefined,
           systemPrompt: t.systemPrompt || "",
+          addDirs: Array.isArray(t.addDirs) ? t.addDirs : undefined,
+          agent: t.agent || undefined,
         } as Tab;
       });
     const activeId = data.activeTabId && restored.some((t: Tab) => t.id === data.activeTabId)
@@ -160,6 +163,8 @@
       sessionId: t.sessionId,
       contextTokens: t.contextTokens,
       systemPrompt: t.systemPrompt,
+      addDirs: t.addDirs,
+      agent: t.agent,
       messages: truncateForStorage(t.messages),
     }));
     const data = JSON.stringify({ tabs: serializable, activeTabId });
@@ -285,11 +290,8 @@
   /** Extract todos from active tab's messages */
   let activeTodos = $derived(extractTodos(activeTab?.messages ?? []));
 
-  /** Build file tree from active tab's tool calls */
-  let activeFileTree = $derived.by(() => {
-    const stats = extractFileStats(activeTab?.messages ?? []);
-    return buildFileTree(stats, activeTab?.cwd || "");
-  });
+  /** Extract file stats for diff overlay on the file explorer */
+  let activeFileStats = $derived(extractFileStats(activeTab?.messages ?? []));
 
   /** Extract all Agent tool calls from the active tab's messages (newest first) */
   let activeAgents = $derived.by(() => {
@@ -321,8 +323,20 @@
   });
 
   onMount(() => {
-    // Load custom commands on startup
+    // Load custom commands and agents on startup
     loadSlashCommands(activeTab.cwd || undefined);
+    invoke<AgentInfo[]>("list_agents").then((agents) => { agentList = agents; }).catch(() => {});
+
+    // Auto-detect and set preferred editor if not yet configured
+    if (!localStorage.getItem("clauke:editor")) {
+      invoke<Array<{id: string; name: string; command: string}>>("detect_editors")
+        .then((editors) => {
+          if (editors.length > 0) {
+            localStorage.setItem("clauke:editor", editors[0].id);
+          }
+        })
+        .catch(() => {});
+    }
 
     // Safety net: persist session on app close so debounced saves aren't lost
     const handleBeforeUnload = () => persistSession();
@@ -443,6 +457,7 @@
       timestamp: Date.now(),
     });
     tab.isRunning = true;
+    tab.runStartTime = Date.now();
 
     // Name tab after first prompt — set a quick label, then auto-title in background
     if (tab.messages.filter((m) => m.role === "user").length === 1) {
@@ -452,7 +467,7 @@
       // Fire-and-forget: generate a better title with haiku
       if (prompt) {
         const tabId = tab.id;
-        invoke<string>("generate_title", { prompt: prompt.slice(0, 200) })
+        invoke<string>("generate_title", { prompt: prompt.slice(0, 200), claudePath: localStorage.getItem("clauke:claudePath") || null })
           .then((title) => {
             const t = findTab(tabId);
             if (t) {
@@ -488,6 +503,9 @@
           skip_permissions: skipPerms,
           allowed_tools: allowedTools,
           system_prompt: sysPrompt || null,
+          add_dirs: tab.addDirs?.length ? tab.addDirs : null,
+          agent: tab.agent || null,
+          claude_path: localStorage.getItem("clauke:claudePath") || null,
         },
       });
     } catch (err) {
@@ -517,6 +535,7 @@
       await invoke("steer_claude", { tabId: tab.id, message });
       // Steering sent — Claude will start generating again
       tab.isRunning = true;
+      tab.runStartTime = Date.now();
     } catch (err) {
       console.warn("Steering failed:", err);
     }
@@ -536,8 +555,60 @@
     if (!tab.isRunning) {
       tab.messages = [];
       tab.sessionId = undefined;
+      tab.usage = undefined;
+      tab.contextTokens = undefined;
       tabs = [...tabs];
       persistSession();
+    }
+  }
+
+  async function handleContinue() {
+    const tab = activeTab;
+    if (tab.isRunning || tab.messages.length > 0 || tab.sessionId) return;
+
+    // Add a system message so the user knows what's happening
+    tab.messages.push({
+      id: `sys-continue-${Date.now()}`,
+      role: "system",
+      content: [{ type: "text", text: "continuing last session..." }],
+      timestamp: Date.now(),
+    });
+    tab.isRunning = true;
+    tab.runStartTime = Date.now();
+
+    try {
+      const mode = tab.permissionMode;
+      const skipPerms = mode === "bypass";
+      let allowedTools: string[] | null = null;
+      if (!skipPerms && mode in PERMISSION_TOOL_SETS) {
+        allowedTools = PERMISSION_TOOL_SETS[mode];
+      }
+      await invoke("send_prompt", {
+        request: {
+          prompt: "Continue where you left off.",
+          cwd: tab.cwd || null,
+          tab_id: tab.id,
+          model: tab.model,
+          effort: tab.effort,
+          session_id: null,
+          images: null,
+          skip_permissions: skipPerms,
+          allowed_tools: allowedTools,
+          system_prompt: tab.systemPrompt || null,
+          add_dirs: tab.addDirs?.length ? tab.addDirs : null,
+          agent: tab.agent || null,
+          continue_last: true,
+          claude_path: localStorage.getItem("clauke:claudePath") || null,
+        },
+      });
+    } catch (err) {
+      tab.isRunning = false;
+      tab.messages.push({
+        id: `err-${Date.now()}`,
+        role: "assistant",
+        content: [{ type: "text", text: `**Error:** ${err}` }],
+        timestamp: Date.now(),
+      });
     }
   }
 
@@ -580,6 +651,12 @@
     activeTabId = id;
   }
 
+  function handleCompact() {
+    const tab = activeTab;
+    if (tab.isRunning || !tab.sessionId) return;
+    handleSend("/compact");
+  }
+
   function handleRenameTab(id: string, name: string) {
     const tab = findTab(id);
     if (tab) {
@@ -590,10 +667,32 @@
   async function browseFolder() {
     const selected = await open({ directory: true, multiple: false });
     if (selected) {
+      const oldCwd = activeTab.cwd;
       activeTab.cwd = selected as string;
+      // Session is tied to the old directory — clear it to avoid resume failures
+      if (oldCwd !== activeTab.cwd) {
+        activeTab.sessionId = undefined;
+      }
       // Reload commands — project might have its own .claude/commands/
       loadSlashCommands(activeTab.cwd);
     }
+  }
+
+  async function addExtraDir() {
+    const selected = await open({ directory: true, multiple: false });
+    if (selected) {
+      const dir = selected as string;
+      // Don't add CWD or duplicates
+      if (dir === activeTab.cwd) return;
+      if (activeTab.addDirs?.includes(dir)) return;
+      activeTab.addDirs = [...(activeTab.addDirs || []), dir];
+    }
+  }
+
+  function removeExtraDir(index: number) {
+    if (!activeTab.addDirs) return;
+    activeTab.addDirs = activeTab.addDirs.filter((_, i) => i !== index);
+    if (activeTab.addDirs.length === 0) activeTab.addDirs = undefined;
   }
 
   // ── Keyboard shortcuts ──
@@ -753,13 +852,25 @@
           type="text"
           placeholder="working directory"
           bind:value={activeTab.cwd}
+          onchange={() => { activeTab.sessionId = undefined; }}
         />
         <button class="btn-browse" onclick={browseFolder} title="Browse folder">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
             <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
           </svg>
         </button>
+        <button class="btn-add-dir" onclick={addExtraDir} title="Add extra directory">+</button>
       </div>
+      {#if activeTab.addDirs?.length}
+        <div class="extra-dirs">
+          {#each activeTab.addDirs as dir, i}
+            <span class="dir-chip" title={dir}>
+              {dir.replace(/\\/g, "/").split("/").pop()}
+              <button class="dir-chip-remove" onclick={() => removeExtraDir(i)}>&times;</button>
+            </span>
+          {/each}
+        </div>
+      {/if}
     </div>
     <button
       class="btn-history"
@@ -778,6 +889,19 @@
     >
       Clear
     </button>
+    {#if !activeTab.isRunning && activeTab.messages.length === 0 && !activeTab.sessionId}
+      <button
+        class="btn-continue"
+        onclick={handleContinue}
+        title="Continue most recent session in this directory"
+      >
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="23 4 23 10 17 10" />
+          <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+        </svg>
+        Continue
+      </button>
+    {/if}
     <button
       class="btn-settings"
       onclick={() => (settingsOpen = !settingsOpen)}
@@ -819,9 +943,10 @@
 
   <div class="main-row">
     <FileTree
-      tree={activeFileTree}
+      cwd={activeTab?.cwd || ""}
       open={fileTreeOpen}
       onToggle={() => (fileTreeOpen = !fileTreeOpen)}
+      fileStats={activeFileStats}
     />
     <main class="chat-area">
       <SearchOverlay
@@ -831,7 +956,7 @@
         onNavigate={handleSearchNavigate}
       />
       {#key activeTabId}
-        <ChatView messages={activeTab.messages} isRunning={activeTab.isRunning} {autoScrollEnabled} onFork={handleFork} onCopy={handleCopyMessage} onEditMessage={handleEditMessage} />
+        <ChatView messages={activeTab.messages} isRunning={activeTab.isRunning} runStartTime={activeTab.runStartTime} {autoScrollEnabled} onFork={handleFork} onCopy={handleCopyMessage} onEditMessage={handleEditMessage} />
       {/key}
     </main>
     <AgentPanel
@@ -874,9 +999,16 @@
       onToggleSystemPrompt={() => (sysPromptOpen = !sysPromptOpen)}
       prefill={pendingEdit?.text || ""}
       onPrefillConsumed={() => (pendingEdit = null)}
+      bind:agent={activeTab.agent}
+      agents={agentList}
     />
     {#if activeTab.contextTokens && activeTab.contextTokens > 0}
-      <ContextIndicator tokens={activeTab.contextTokens} model={activeTab.model} />
+      <ContextIndicator
+        tokens={activeTab.contextTokens}
+        model={activeTab.model}
+        onCompact={handleCompact}
+        canCompact={!!activeTab.sessionId && !activeTab.isRunning && (activeTab.contextTokens || 0) > 0}
+      />
     {/if}
     {#if activeTab.usage && (activeTab.usage.inputTokens > 0 || activeTab.usage.outputTokens > 0)}
       <div class="token-bar">
@@ -897,6 +1029,9 @@
         <span class="token-stat total" title="Total tokens">
           <span class="token-label">&Sigma;</span>
           <span class="token-value">{formatTokens(activeTab.usage.inputTokens + activeTab.usage.outputTokens)}</span>
+        </span>
+        <span class="token-stat cost" title="Estimated API cost for this session">
+          <span class="token-value cost-value">{formatCost(calculateCost(activeTab.usage, activeTab.model))}</span>
         </span>
       </div>
     {/if}
@@ -1018,6 +1153,79 @@
     background: var(--bg-glass-hover);
   }
 
+  .btn-add-dir {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border-radius: var(--radius-sm);
+    border: 1px dashed var(--border-subtle);
+    background: none;
+    color: var(--text-tertiary);
+    cursor: pointer;
+    flex-shrink: 0;
+    font-size: 13px;
+    font-weight: 300;
+    line-height: 1;
+    transition: all 0.15s ease;
+    opacity: 0.6;
+  }
+  .btn-add-dir:hover {
+    color: var(--text-secondary);
+    border-color: var(--border);
+    background: var(--bg-input);
+    opacity: 1;
+  }
+
+  .extra-dirs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 4px;
+  }
+
+  .dir-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 1px 7px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--text-tertiary);
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    max-width: 140px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .dir-chip-remove {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 12px;
+    height: 12px;
+    border: none;
+    background: none;
+    color: var(--text-tertiary);
+    cursor: pointer;
+    padding: 0;
+    font-size: 11px;
+    line-height: 1;
+    border-radius: 3px;
+    opacity: 0.5;
+    transition: all 0.1s ease;
+    flex-shrink: 0;
+  }
+  .dir-chip-remove:hover {
+    opacity: 1;
+    color: rgba(248, 113, 113, 0.9);
+    background: rgba(239, 68, 68, 0.15);
+  }
+
   .btn-history {
     position: relative;
     display: flex;
@@ -1059,6 +1267,28 @@
   .btn-clear:disabled {
     opacity: 0.2;
     cursor: default;
+  }
+
+  .btn-continue {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 12px;
+    font-size: 11.5px;
+    font-weight: 450;
+    color: rgba(167, 139, 250, 0.7);
+    background: none;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: all 0.2s ease;
+    -webkit-app-region: no-drag;
+    animation: fadeIn 0.3s var(--ease-out-expo);
+  }
+  .btn-continue:hover {
+    color: rgba(167, 139, 250, 0.95);
+    border-color: rgba(167, 139, 250, 0.2);
+    background: rgba(167, 139, 250, 0.06);
   }
 
   .main-row {
@@ -1166,6 +1396,17 @@
     opacity: 0.7;
   }
 
+  .token-stat.cost {
+    margin-left: 4px;
+    padding-left: 8px;
+    border-left: 1px solid var(--border-subtle);
+  }
+
+  .cost-value {
+    color: rgba(167, 139, 250, 0.75);
+    font-weight: 500;
+  }
+
   .btn-settings {
     display: flex;
     align-items: center;
@@ -1238,9 +1479,9 @@
   .perm-dialog {
     width: 380px;
     max-width: 90vw;
-    background: rgba(30, 30, 34, 0.85);
-    backdrop-filter: blur(48px) saturate(1.4);
-    -webkit-backdrop-filter: blur(48px) saturate(1.4);
+    background: var(--glass-panel-bg);
+    backdrop-filter: var(--glass-panel-blur);
+    -webkit-backdrop-filter: var(--glass-panel-blur);
     border: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: var(--radius-md);
     padding: 20px;

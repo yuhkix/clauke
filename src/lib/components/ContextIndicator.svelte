@@ -3,7 +3,17 @@
   import { MODEL_CONTEXT_LIMITS } from "../types";
   import type { ClaudeModel } from "../types";
 
-  let { tokens = 0, model = "opus" as ClaudeModel }: { tokens: number; model?: ClaudeModel } = $props();
+  let {
+    tokens = 0,
+    model = "opus" as ClaudeModel,
+    onCompact,
+    canCompact = false,
+  }: {
+    tokens: number;
+    model?: ClaudeModel;
+    onCompact?: () => void;
+    canCompact?: boolean;
+  } = $props();
 
   let maxContext = $derived(MODEL_CONTEXT_LIMITS[model] || 200_000);
   let fill = $derived(Math.min(tokens / maxContext, 1));
@@ -40,9 +50,12 @@
       ></div>
     </div>
     {#if showLabel}
-      <div class="tooltip">
+      <div class="tooltip" class:interactive={canCompact}>
         <span class="tooltip-pct">{pct}%</span>
         <span class="tooltip-detail">{Math.round(tokens / 1000)}k / {maxContext / 1000}k</span>
+        {#if canCompact}
+          <button class="compact-btn" onclick={onCompact}>compact</button>
+        {/if}
       </div>
     {/if}
   </div>
@@ -98,6 +111,10 @@
     z-index: 10;
   }
 
+  .tooltip.interactive {
+    pointer-events: auto;
+  }
+
   @keyframes tooltipIn {
     from { opacity: 0; transform: translateX(-50%) translateY(4px); }
     to { opacity: 1; transform: translateX(-50%) translateY(0); }
@@ -116,6 +133,26 @@
     font-size: 10px;
     color: var(--text-tertiary);
     font-variant-numeric: tabular-nums;
+  }
+
+  .compact-btn {
+    margin-left: 2px;
+    padding: 1px 7px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 500;
+    color: rgba(167, 139, 250, 0.7);
+    background: rgba(167, 139, 250, 0.08);
+    border: 1px solid rgba(167, 139, 250, 0.15);
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .compact-btn:hover {
+    color: rgba(167, 139, 250, 0.95);
+    background: rgba(167, 139, 250, 0.15);
+    border-color: rgba(167, 139, 250, 0.3);
   }
 
   :global([data-theme="light"]) .track {
