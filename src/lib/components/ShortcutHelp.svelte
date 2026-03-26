@@ -16,7 +16,10 @@
       closing = false;
     } else if (visible) {
       closing = true;
-      setTimeout(() => { visible = false; closing = false; }, 200);
+      setTimeout(() => {
+        visible = false;
+        closing = false;
+      }, 200);
     }
   });
 
@@ -47,34 +50,63 @@
 
 {#if visible}
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="overlay" class:closing onclick={handleClose} onkeydown={(e) => e.key === "Escape" && handleClose()}>
+  <div
+    class="overlay"
+    class:closing
+    onclick={handleClose}
+    onkeydown={(e) => e.key === "Escape" && handleClose()}
+  >
     <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="modal" class:closing onclick={(e) => e.stopPropagation()}>
+    <div
+      class="modal"
+      class:closing
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="modal-title"
+    >
       <div class="modal-header">
-        <span class="modal-title">shortcuts</span>
+        <span class="modal-title" id="modal-title">shortcuts</span>
         <button class="close-btn" title="Close" onclick={handleClose}>
           <svg width="10" height="10" viewBox="0 0 10 10">
-            <line x1="2" y1="2" x2="8" y2="8" stroke="currentColor" stroke-width="1.2" />
-            <line x1="8" y1="2" x2="2" y2="8" stroke="currentColor" stroke-width="1.2" />
+            <line
+              x1="2"
+              y1="2"
+              x2="8"
+              y2="8"
+              stroke="currentColor"
+              stroke-width="1.2"
+            />
+            <line
+              x1="8"
+              y1="2"
+              x2="2"
+              y2="8"
+              stroke="currentColor"
+              stroke-width="1.2"
+            />
           </svg>
         </button>
       </div>
 
       <div class="shortcut-list">
         {#each shortcuts as item}
-          {#if 'section' in item && item.section}
+          {#if "section" in item && item.section}
             <div class="section-label">{item.section}</div>
-          {:else if 'keys' in item}
+          {:else if "keys" in item}
             <div class="shortcut-row">
               <div class="keys">
-                {#each item.keys.split(" + ") as part, i}
+                {#each item.keys?.split(" + ") ?? [] as part, i}
                   {#if part === "+" || part === "/" || part === "–"}
                     <span class="separator">{part}</span>
                   {:else if part.includes("–")}
                     <!-- range like 1–9 -->
-                    <kbd>{part.split("–")[0]}</kbd><span class="separator">–</span><kbd>{part.split("–")[1]}</kbd>
+                    <kbd>{part.split("–")[0]}</kbd><span class="separator"
+                      >–</span
+                    ><kbd>{part.split("–")[1]}</kbd>
                   {:else if part.includes(" / ")}
-                    <kbd>{part.split(" / ")[0]}</kbd><span class="separator">/</span><kbd>{part.split(" / ")[1]}</kbd>
+                    <kbd>{part.split(" / ")[0]}</kbd><span class="separator"
+                      >/</span
+                    ><kbd>{part.split(" / ")[1]}</kbd>
                   {:else}
                     {#if i > 0}<span class="separator">+</span>{/if}
                     <kbd>{part}</kbd>
@@ -222,17 +254,31 @@
   }
 
   @keyframes fadeIn {
-    from { opacity: 0; }
-    to { opacity: 1; }
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
   }
 
   @keyframes fadeOut {
-    from { opacity: 1; }
-    to { opacity: 0; }
+    from {
+      opacity: 1;
+    }
+    to {
+      opacity: 0;
+    }
   }
 
   @keyframes slideDown {
-    from { transform: translateY(0); opacity: 1; }
-    to { transform: translateY(8px); opacity: 0; }
+    from {
+      transform: translateY(0);
+      opacity: 1;
+    }
+    to {
+      transform: translateY(8px);
+      opacity: 0;
+    }
   }
 </style>

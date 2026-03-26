@@ -13,5 +13,14 @@ export default defineConfig({
     target: "esnext",
     minify: !process.env.TAURI_DEBUG ? "esbuild" : false,
     sourcemap: !!process.env.TAURI_DEBUG,
+    chunkSizeWarningLimit: 800,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          highlight: ["highlight.js"],
+          marked: ["marked"],
+        },
+      },
+    },
   },
 });
