@@ -15,10 +15,12 @@
   import TodoPanel from "./lib/components/TodoPanel.svelte";
   import ContextIndicator from "./lib/components/ContextIndicator.svelte";
   import FileTree from "./lib/components/FileTree.svelte";
+  import ChangeTracker from "./lib/components/ChangeTracker.svelte";
+  import FileEditor from "./lib/components/FileEditor.svelte";
   import ShortcutHelp from "./lib/components/ShortcutHelp.svelte";
   import SearchOverlay from "./lib/components/SearchOverlay.svelte";
   import type { ChatMessage, ClaudeEvent, Tab, SlashCommand, ToolCall, SessionRecord, TokenUsage, PermissionMode, TodoItem, AgentInfo } from "./lib/types";
-  import { BUILTIN_COMMANDS, MAX_SESSION_HISTORY, emptyUsage, addUsage, formatTokens, calculateCost, formatCost, PERMISSION_TOOL_SETS, extractTodos, extractFileStats, MODEL_CONTEXT_LIMITS } from "./lib/types";
+  import { BUILTIN_COMMANDS, MAX_SESSION_HISTORY, emptyUsage, addUsage, formatTokens, calculateCost, formatCost, PERMISSION_TOOL_SETS, extractTodos, extractFileStats, extractFileChanges, MODEL_CONTEXT_LIMITS } from "./lib/types";
   import { processClaudeEvent, cleanupTabState } from "./lib/claude";
 
   let settingsOpen = $state(false);
@@ -28,6 +30,9 @@
   let shortcutHelpOpen = $state(false);
   let sysPromptOpen = $state(false);
   let searchOpen = $state(false);
+  let changeTrackerOpen = $state(false);
+  let fileEditorOpen = $state(false);
+  let fileEditorPath = $state("");
 
   /** Steering is always available — prompts go via stdin stream-json */
   const canSteer = true;
@@ -293,6 +298,9 @@
   /** Extract file stats for diff overlay on the file explorer */
   let activeFileStats = $derived(extractFileStats(activeTab?.messages ?? []));
 
+  /** Extract file changes for the change tracker */
+  let activeFileChanges = $derived(extractFileChanges(activeTab?.messages ?? []));
+
   /** Extract all Agent tool calls from the active tab's messages (newest first) */
   let activeAgents = $derived.by(() => {
     const msgs = activeTab?.messages ?? [];
@@ -323,19 +331,18 @@
   });
 
   onMount(() => {
+    // Disable browser context menu in production builds
+    if (!import.meta.env.DEV) {
+      document.addEventListener("contextmenu", (e) => e.preventDefault());
+    }
+
     // Load custom commands and agents on startup
     loadSlashCommands(activeTab.cwd || undefined);
     invoke<AgentInfo[]>("list_agents").then((agents) => { agentList = agents; }).catch(() => {});
 
-    // Auto-detect and set preferred editor if not yet configured
+    // Auto-detect and set preferred editor if not yet configured — default to VS Code
     if (!localStorage.getItem("clauke:editor")) {
-      invoke<Array<{id: string; name: string; command: string}>>("detect_editors")
-        .then((editors) => {
-          if (editors.length > 0) {
-            localStorage.setItem("clauke:editor", editors[0].id);
-          }
-        })
-        .catch(() => {});
+      localStorage.setItem("clauke:editor", "vscode");
     }
 
     // Safety net: persist session on app close so debounced saves aren't lost
@@ -393,16 +400,6 @@
           maxCtx,
         );
         if (ctx > 0) {
-          // Heuristic compaction detection: context dropped by >30%
-          // Skip if the CLI already told us about it (compacted flag).
-          if (tab.contextTokens && ctx < tab.contextTokens * 0.7 && !result.compacted) {
-            tab.messages.push({
-              id: `sys-compact-${Date.now()}`,
-              role: "system",
-              content: [{ type: "text", text: "context compacted" }],
-              timestamp: Date.now(),
-            });
-          }
           tab.contextTokens = ctx;
         }
       }
@@ -695,6 +692,11 @@
     if (activeTab.addDirs.length === 0) activeTab.addDirs = undefined;
   }
 
+  function openInEditor(filePath: string) {
+    fileEditorPath = filePath;
+    fileEditorOpen = true;
+  }
+
   // ── Keyboard shortcuts ──
   function handleGlobalKeydown(e: KeyboardEvent) {
     const ctrl = e.ctrlKey || e.metaKey;
@@ -720,6 +722,10 @@
       case "f":
         e.preventDefault();
         searchOpen = !searchOpen;
+        break;
+      case "j":
+        e.preventDefault();
+        changeTrackerOpen = !changeTrackerOpen;
         break;
       case "/":
         e.preventDefault();
@@ -947,6 +953,7 @@
       open={fileTreeOpen}
       onToggle={() => (fileTreeOpen = !fileTreeOpen)}
       fileStats={activeFileStats}
+      onOpenInEditor={openInEditor}
     />
     <main class="chat-area">
       <SearchOverlay
@@ -963,6 +970,13 @@
       agents={activeAgents}
       open={agentPanelOpen}
       onToggle={() => (agentPanelOpen = !agentPanelOpen)}
+    />
+    <ChangeTracker
+      changes={activeFileChanges}
+      fileStats={activeFileStats}
+      open={changeTrackerOpen}
+      onToggle={() => (changeTrackerOpen = !changeTrackerOpen)}
+      onOpenEditor={openInEditor}
     />
   </div>
 
@@ -1002,39 +1016,35 @@
       bind:agent={activeTab.agent}
       agents={agentList}
     />
-    {#if activeTab.contextTokens && activeTab.contextTokens > 0}
-      <ContextIndicator
-        tokens={activeTab.contextTokens}
-        model={activeTab.model}
-        onCompact={handleCompact}
-        canCompact={!!activeTab.sessionId && !activeTab.isRunning && (activeTab.contextTokens || 0) > 0}
-      />
-    {/if}
-    {#if activeTab.usage && (activeTab.usage.inputTokens > 0 || activeTab.usage.outputTokens > 0)}
-      <div class="token-bar">
-        <span class="token-stat" title="Input tokens">
-          <span class="token-label">in</span>
-          <span class="token-value">{formatTokens(activeTab.usage.inputTokens)}</span>
+    <ContextIndicator
+      tokens={activeTab.contextTokens || 0}
+      model={activeTab.model}
+      onCompact={handleCompact}
+      canCompact={!!activeTab.sessionId && !activeTab.isRunning && (activeTab.contextTokens || 0) > 0}
+    />
+    <div class="token-bar">
+      <span class="token-stat" title="Input tokens">
+        <span class="token-label">in</span>
+        <span class="token-value">{formatTokens(activeTab.usage?.inputTokens ?? 0)}</span>
+      </span>
+      <span class="token-stat" title="Output tokens">
+        <span class="token-label">out</span>
+        <span class="token-value">{formatTokens(activeTab.usage?.outputTokens ?? 0)}</span>
+      </span>
+      {#if (activeTab.usage?.cacheReadTokens ?? 0) > 0}
+        <span class="token-stat" title="Cache read tokens">
+          <span class="token-label">cache</span>
+          <span class="token-value">{formatTokens(activeTab.usage?.cacheReadTokens ?? 0)}</span>
         </span>
-        <span class="token-stat" title="Output tokens">
-          <span class="token-label">out</span>
-          <span class="token-value">{formatTokens(activeTab.usage.outputTokens)}</span>
-        </span>
-        {#if activeTab.usage.cacheReadTokens > 0}
-          <span class="token-stat" title="Cache read tokens">
-            <span class="token-label">cache</span>
-            <span class="token-value">{formatTokens(activeTab.usage.cacheReadTokens)}</span>
-          </span>
-        {/if}
-        <span class="token-stat total" title="Total tokens">
-          <span class="token-label">&Sigma;</span>
-          <span class="token-value">{formatTokens(activeTab.usage.inputTokens + activeTab.usage.outputTokens)}</span>
-        </span>
-        <span class="token-stat cost" title="Estimated API cost for this session">
-          <span class="token-value cost-value">{formatCost(calculateCost(activeTab.usage, activeTab.model))}</span>
-        </span>
-      </div>
-    {/if}
+      {/if}
+      <span class="token-stat total" title="Total tokens">
+        <span class="token-label">&Sigma;</span>
+        <span class="token-value">{formatTokens((activeTab.usage?.inputTokens ?? 0) + (activeTab.usage?.outputTokens ?? 0))}</span>
+      </span>
+      <span class="token-stat cost" title="Estimated API cost for this session">
+        <span class="token-value cost-value">{formatCost(calculateCost(activeTab.usage ?? emptyUsage(), activeTab.model))}</span>
+      </span>
+    </div>
   </footer>
 
   <!-- Permission dialog -->
@@ -1058,6 +1068,11 @@
     </div>
   {/if}
 
+  <FileEditor
+    filePath={fileEditorPath}
+    open={fileEditorOpen}
+    onClose={() => (fileEditorOpen = false)}
+  />
   <ShortcutHelp open={shortcutHelpOpen} onClose={() => (shortcutHelpOpen = false)} />
   <SettingsPanel open={settingsOpen} onClose={() => (settingsOpen = false)} onSettingsChange={handleSettingsChange} />
   <SessionManager

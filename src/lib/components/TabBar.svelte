@@ -48,7 +48,8 @@
 </script>
 
 <div class="tab-bar">
-  <div class="tabs-scroll">
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="tabs-scroll" onmousedown={(e: MouseEvent) => { if (e.button === 1) e.preventDefault(); }}>
     {#each tabs as tab (tab.id)}
       <div
         class="tab"
@@ -58,6 +59,7 @@
         tabindex="0"
         onclick={() => onSelect(tab.id)}
         ondblclick={(e: MouseEvent) => { e.preventDefault(); startRename(tab); }}
+        onauxclick={(e: MouseEvent) => { if (e.button === 1) { e.preventDefault(); onClose(tab.id); } }}
         onkeydown={(e: KeyboardEvent) => e.key === "Enter" && onSelect(tab.id)}
         title={tab.cwd || tab.name}
       >

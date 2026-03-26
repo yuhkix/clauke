@@ -36,6 +36,7 @@
     { keys: "Ctrl + F", desc: "Search conversation" },
     { section: "panels" },
     { keys: "Ctrl + B", desc: "Toggle file explorer" },
+    { keys: "Ctrl + J", desc: "Toggle change tracker" },
     { keys: "Ctrl + /", desc: "Show shortcuts" },
     { section: "input" },
     { keys: "Tab", desc: "Complete slash command" },

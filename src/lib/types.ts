@@ -388,6 +388,64 @@ export function extractFileStats(messages: ChatMessage[]): Map<string, FileStats
   return stats;
 }
 
+/** A single file change event (Edit or Write) for the change tracker */
+export interface FileChange {
+  /** Which tool made the change */
+  tool: "Edit" | "Write";
+  /** Absolute file path */
+  filePath: string;
+  /** Old content (Edit only) */
+  oldString?: string;
+  /** New content */
+  newString?: string;
+  /** Full file content (Write only) */
+  content?: string;
+  /** When the change happened */
+  timestamp: number;
+  /** Whether the tool call completed successfully */
+  isComplete: boolean;
+  /** Whether the tool call had an error */
+  isError?: boolean;
+}
+
+/** Extract ordered file change events from messages */
+export function extractFileChanges(messages: ChatMessage[]): FileChange[] {
+  const changes: FileChange[] = [];
+
+  for (const msg of messages) {
+    if (msg.role !== "assistant") continue;
+    for (const block of msg.content) {
+      if (block.type !== "tool_call") continue;
+      const tc = block.toolCall;
+      const filePath = tc.input.file_path as string | undefined;
+      if (!filePath) continue;
+
+      if (tc.name === "Edit") {
+        changes.push({
+          tool: "Edit",
+          filePath,
+          oldString: tc.input.old_string as string | undefined,
+          newString: tc.input.new_string as string | undefined,
+          timestamp: tc.startTime,
+          isComplete: tc.isComplete,
+          isError: tc.isError,
+        });
+      } else if (tc.name === "Write") {
+        changes.push({
+          tool: "Write",
+          filePath,
+          content: tc.input.content as string | undefined,
+          timestamp: tc.startTime,
+          isComplete: tc.isComplete,
+          isError: tc.isError,
+        });
+      }
+    }
+  }
+
+  return changes;
+}
+
 /** Tool icons (simple text-based) */
 export const TOOL_ICONS: Record<string, string> = {
   Bash: "$",

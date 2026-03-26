@@ -286,7 +286,7 @@
   .panel-tab {
     position: absolute;
     right: 0;
-    top: 50%;
+    top: 58%;
     transform: translateY(-50%);
     z-index: 10;
     display: flex;

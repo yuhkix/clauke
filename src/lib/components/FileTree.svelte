@@ -7,11 +7,13 @@
     open,
     onToggle,
     fileStats,
+    onOpenInEditor,
   }: {
     cwd: string;
     open: boolean;
     onToggle: () => void;
     fileStats?: Map<string, FileStats>;
+    onOpenInEditor?: (path: string) => void;
   } = $props();
 
   interface FsEntry {
@@ -79,8 +81,19 @@
   }
 
   async function openFile(entry: FsEntry) {
-    const editor = localStorage.getItem("clauke:editor") || "";
-    if (!editor) return;
+    // If built-in editor callback is available, use it
+    if (onOpenInEditor) {
+      onOpenInEditor(entry.path);
+      return;
+    }
+    const editor = localStorage.getItem("clauke:editor") || "vscode";
+    try {
+      await invoke("open_in_editor", { editor, file: entry.path, cwd });
+    } catch { /* silently fail */ }
+  }
+
+  async function openExternal(entry: FsEntry) {
+    const editor = localStorage.getItem("clauke:editor") || "vscode";
     try {
       await invoke("open_in_editor", { editor, file: entry.path, cwd });
     } catch { /* silently fail */ }
@@ -129,6 +142,7 @@
         class="tree-item dir"
         style:padding-left="{12 + depth * 14}px"
         onclick={() => toggleDir(entry)}
+        onselectstart={(e: Event) => e.preventDefault()}
       >
         <svg class="chevron" class:open={isExpanded} width="10" height="10" viewBox="0 0 10 10">
           <polyline points="3,2 7,5 3,8" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
@@ -150,8 +164,10 @@
         class="tree-item file"
         class:modified={hasChanges}
         style:padding-left="{12 + depth * 14 + 14}px"
-        title="{entry.path}{stats ? ` (${stats.reads}R ${stats.writes}W)` : ''}"
+        title="{entry.path}{stats ? ` (${stats.reads}R ${stats.writes}W)` : ''}\nclick: built-in editor | middle-click: external editor"
         onclick={() => openFile(entry)}
+        onauxclick={(e: MouseEvent) => { if (e.button === 1) { e.preventDefault(); openExternal(entry); } }}
+        onselectstart={(e: Event) => e.preventDefault()}
       >
         <svg class="icon-file" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
           <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
@@ -200,7 +216,8 @@
         </button>
       </div>
     </div>
-    <div class="tree-scroll">
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="tree-scroll" onmousedown={(e: MouseEvent) => { if (e.button === 1) e.preventDefault(); }}>
       {#if !cwd}
         <div class="empty-msg">no working directory set</div>
       {:else if rootEntries.length === 0 && loading.size > 0}
@@ -211,7 +228,7 @@
         {@render treeNodes(rootEntries, 0)}
       {/if}
     </div>
-    {#if !localStorage.getItem("clauke:editor")}
+    {#if !onOpenInEditor && !localStorage.getItem("clauke:editor")}
       <div class="no-editor-hint">set preferred editor in settings to open files</div>
     {/if}
   </div>
@@ -262,6 +279,8 @@
     z-index: 9;
     animation: slideIn 0.25s var(--ease-out-expo);
     overflow: hidden;
+    user-select: none;
+    -webkit-user-select: none;
   }
 
   @keyframes slideIn {

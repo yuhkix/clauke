@@ -774,38 +774,66 @@ async fn check_claude_cli(custom_path: Option<String>) -> Result<String, String>
 /// Open a file in the preferred editor, with the project folder as workspace.
 #[tauri::command]
 async fn open_in_editor(editor: String, file: String, cwd: String) -> Result<(), String> {
-    let result = match editor.as_str() {
-        "vscode" => std::process::Command::new("code")
-            .args(["--reuse-window", &cwd, "--goto", &file])
-            .spawn(),
-        "cursor" => std::process::Command::new("cursor")
-            .args(["--reuse-window", &cwd, "--goto", &file])
-            .spawn(),
-        "sublime" => std::process::Command::new("subl")
-            .args([&cwd, &file])
-            .spawn(),
+    let mut cmd = match editor.as_str() {
+        "vscode" => {
+            // On Windows, `code` is a .cmd wrapper — use cmd /c to launch it
+            let mut c = std::process::Command::new("cmd");
+            c.args(["/c", "code", "--reuse-window", &cwd, "--goto", &file]);
+            c
+        }
+        "cursor" => {
+            let mut c = std::process::Command::new("cmd");
+            c.args(["/c", "cursor", "--reuse-window", &cwd, "--goto", &file]);
+            c
+        }
+        "sublime" => {
+            let mut c = std::process::Command::new("cmd");
+            c.args(["/c", "subl", &cwd, &file]);
+            c
+        }
         "neovim" => {
             if is_in_path("wt") {
-                std::process::Command::new("wt")
-                    .args(["-d", &cwd, "nvim", &file])
-                    .spawn()
+                let mut c = std::process::Command::new("wt");
+                c.args(["-d", &cwd, "nvim", &file]);
+                c
             } else {
-                std::process::Command::new("cmd")
-                    .args([
-                        "/c", "start", "cmd", "/k",
-                        &format!("cd /d \"{}\" && nvim \"{}\"", cwd, file),
-                    ])
-                    .spawn()
+                let mut c = std::process::Command::new("cmd");
+                c.args([
+                    "/c", "start", "cmd", "/k",
+                    &format!("cd /d \"{}\" && nvim \"{}\"", cwd, file),
+                ]);
+                c
             }
         }
-        "antigravity" => std::process::Command::new("antigravity")
-            .args([&cwd, "--goto", &file])
-            .spawn(),
+        "antigravity" => {
+            let mut c = std::process::Command::new("cmd");
+            c.args(["/c", "antigravity", &cwd, "--goto", &file]);
+            c
+        }
         _ => return Err(format!("Unknown editor: {}", editor)),
     };
 
-    result.map_err(|e| format!("Failed to open editor: {}", e))?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    cmd.spawn().map_err(|e| format!("Failed to open editor: {}", e))?;
     Ok(())
+}
+
+/// Read file contents for the built-in editor.
+#[tauri::command]
+async fn read_file_contents(path: String) -> Result<String, String> {
+    std::fs::read_to_string(&path).map_err(|e| format!("Failed to read file: {}", e))
+}
+
+/// Write file contents from the built-in editor.
+#[tauri::command]
+async fn write_file_contents(path: String, content: String) -> Result<(), String> {
+    std::fs::write(&path, &content).map_err(|e| format!("Failed to write file: {}", e))
 }
 
 pub fn run() {
@@ -817,7 +845,7 @@ pub fn run() {
         .manage(AppState {
             tabs: Arc::new(Mutex::new(HashMap::new())),
         })
-        .invoke_handler(tauri::generate_handler![send_prompt, stop_claude, steer_claude, save_clipboard_image, list_slash_commands, cleanup_clipboard, generate_title, list_agents, list_mcp_servers, add_mcp_server, remove_mcp_server, list_hooks, add_hook, remove_hook, storage_read, storage_write, storage_delete, get_cli_mode, list_directory, detect_editors, open_in_editor, check_claude_cli])
+        .invoke_handler(tauri::generate_handler![send_prompt, stop_claude, steer_claude, save_clipboard_image, list_slash_commands, cleanup_clipboard, generate_title, list_agents, list_mcp_servers, add_mcp_server, remove_mcp_server, list_hooks, add_hook, remove_hook, storage_read, storage_write, storage_delete, get_cli_mode, list_directory, detect_editors, open_in_editor, check_claude_cli, read_file_contents, write_file_contents])
         .run(tauri::generate_context!())
         .expect("error while running clauke");
 }

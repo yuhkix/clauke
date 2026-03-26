@@ -70,7 +70,8 @@
       helpText = helpContent[key] || "";
       if (target && target instanceof HTMLElement) {
         const rect = target.getBoundingClientRect();
-        helpPos = { x: rect.left, y: rect.bottom + 6 };
+        const maxX = window.innerWidth - 576;
+        helpPos = { x: Math.max(8, Math.min(rect.left, maxX)), y: rect.bottom + 6 };
       }
       helpVisible = true;
     }, 800);
@@ -108,16 +109,27 @@
 
   // ── Editor ──
   interface EditorEntry { id: string; name: string; command: string; }
-  let detectedEditors = $state<EditorEntry[]>([]);
+
+  /** All supported editors — always shown, detected ones get a checkmark */
+  const ALL_EDITORS: EditorEntry[] = [
+    { id: "vscode", name: "VS Code", command: "code" },
+    { id: "cursor", name: "Cursor", command: "cursor" },
+    { id: "sublime", name: "Sublime Text", command: "subl" },
+    { id: "antigravity", name: "Antigravity", command: "antigravity" },
+    { id: "neovim", name: "Neovim", command: "nvim" },
+  ];
+
+  let detectedEditorIds = $state<Set<string>>(new Set());
   let editorLoading = $state(false);
-  let selectedEditor = $state(localStorage.getItem("clauke:editor") || "");
+  let selectedEditor = $state(localStorage.getItem("clauke:editor") || "vscode");
 
   async function loadEditors() {
     editorLoading = true;
     try {
-      detectedEditors = await invoke<EditorEntry[]>("detect_editors");
+      const detected = await invoke<EditorEntry[]>("detect_editors");
+      detectedEditorIds = new Set(detected.map(e => e.id));
     } catch {
-      detectedEditors = [];
+      detectedEditorIds = new Set();
     }
     editorLoading = false;
   }
@@ -535,21 +547,22 @@
           <div class="row">
             <div class="label-group">
               <span class="label">preferred editor</span>
-              <span class="desc">click files in explorer to open</span>
+              <span class="desc">middle-click files in explorer to open</span>
             </div>
             {#if editorLoading}
               <span class="desc" style="flex-shrink:0">detecting...</span>
-            {:else if detectedEditors.length > 0}
+            {:else}
               <button class="pill" onclick={() => {
-                const ids = ["", ...detectedEditors.map(e => e.id)];
+                const ids = ALL_EDITORS.map(e => e.id);
                 const idx = ids.indexOf(selectedEditor);
                 selectedEditor = ids[(idx + 1) % ids.length];
                 save("editor", selectedEditor);
               }}>
-                {detectedEditors.find(e => e.id === selectedEditor)?.name || "none"}
+                {ALL_EDITORS.find(e => e.id === selectedEditor)?.name || selectedEditor}
+                {#if detectedEditorIds.has(selectedEditor)}
+                  <span style="opacity:0.5; margin-left:2px">*</span>
+                {/if}
               </button>
-            {:else}
-              <span class="desc" style="flex-shrink:0; opacity:0.5">no editors found</span>
             {/if}
           </div>
         </div>
@@ -1253,8 +1266,8 @@
   .help-tooltip {
     position: fixed;
     z-index: 200;
-    max-width: 280px;
-    padding: 10px 12px;
+    max-width: min(560px, calc(100vw - 32px));
+    padding: 10px 14px;
     background: rgba(20, 20, 35, 0.96);
     backdrop-filter: blur(12px);
     -webkit-backdrop-filter: blur(12px);
@@ -1278,6 +1291,8 @@
     margin: 0;
     white-space: pre-wrap;
     word-wrap: break-word;
+    max-height: 240px;
+    overflow-y: auto;
   }
 
   :global([data-theme="light"]) .help-tooltip {
