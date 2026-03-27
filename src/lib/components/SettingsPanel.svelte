@@ -219,6 +219,26 @@
     save("autoScroll", String(autoScroll));
   }
 
+  // ── Discord RPC ──
+  let discordRpcEnabled = $state(true);
+
+  async function loadDiscordRpcState() {
+    try {
+      discordRpcEnabled = await invoke<boolean>("get_discord_rpc_enabled");
+    } catch {
+      discordRpcEnabled = true;
+    }
+  }
+
+  async function toggleDiscordRpc() {
+    discordRpcEnabled = !discordRpcEnabled;
+    try {
+      await invoke("toggle_discord_rpc", { enabled: discordRpcEnabled });
+    } catch {
+      // Discord not running — toggle still persists preference
+    }
+  }
+
   const permModes: PermissionMode[] = ["bypass", "acceptEdits", "plan", "default"];
 
   function cyclePermissionMode() {
@@ -366,6 +386,7 @@
       loadHooks();
       loadEditors();
       checkCli();
+      loadDiscordRpcState();
     }
   });
 </script>
@@ -534,6 +555,26 @@
               class:active={autoScroll}
               title="Toggle auto-scroll"
               onclick={toggleAutoScroll}
+            >
+              <span class="toggle-knob"></span>
+            </button>
+          </div>
+        </div>
+
+        <!-- ── Discord RPC ── -->
+        <div class="section">
+          <div class="section-title">integrations</div>
+
+          <div class="row">
+            <div class="label-group">
+              <span class="label">discord rich presence</span>
+              <span class="desc">show session stats in your Discord profile</span>
+            </div>
+            <button
+              class="toggle"
+              class:active={discordRpcEnabled}
+              title="Toggle Discord Rich Presence"
+              onclick={toggleDiscordRpc}
             >
               <span class="toggle-knob"></span>
             </button>

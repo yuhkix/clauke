@@ -1,6 +1,7 @@
 mod claude;
 
 use claude::{ClaudeProcess, ClaudeRunner};
+use discord_rich_presence::{activity, DiscordIpc, DiscordIpcClient};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -11,6 +12,14 @@ use tokio::sync::Mutex;
 /// Shared state: one Claude process per tab.
 struct AppState {
     tabs: Arc<Mutex<HashMap<String, ClaudeProcess>>>,
+    discord: Arc<Mutex<DiscordRpcState>>,
+}
+
+/// Discord Rich Presence state.
+struct DiscordRpcState {
+    client: Option<DiscordIpcClient>,
+    enabled: bool,
+    start_timestamp: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -836,16 +845,174 @@ async fn write_file_contents(path: String, content: String) -> Result<(), String
     std::fs::write(&path, &content).map_err(|e| format!("Failed to write file: {}", e))
 }
 
+// ── Discord Rich Presence ──
+
+/// The Discord Application ID for clauke.
+/// Create your own at https://discord.com/developers/applications if needed.
+const DISCORD_APP_ID: &str = "1354941809673576508";
+
+/// Toggle Discord Rich Presence on or off. Persists the preference.
+#[tauri::command]
+async fn toggle_discord_rpc(state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
+    let mut rpc = state.discord.lock().await;
+    rpc.enabled = enabled;
+
+    if enabled {
+        if rpc.client.is_none() {
+            let mut client = DiscordIpcClient::new(DISCORD_APP_ID);
+            if client.connect().is_ok() {
+                rpc.start_timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                let ts = rpc.start_timestamp;
+                let _ = client.set_activity(
+                    activity::Activity::new()
+                        .state("Idle")
+                        .details("Using clauke")
+                        .timestamps(activity::Timestamps::new().start(ts))
+                        .assets(
+                            activity::Assets::new()
+                                .large_image("clauke_icon")
+                                .large_text("clauke — Claude Code Wrapper"),
+                        ),
+                );
+                rpc.client = Some(client);
+            }
+        }
+    } else if let Some(ref mut client) = rpc.client {
+        let _ = client.clear_activity();
+        let _ = client.close();
+        rpc.client = None;
+    }
+
+    // Persist preference
+    drop(rpc);
+    let dir = data_dir()?;
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(|e| e.to_string())?;
+    let path = dir.join("discord_rpc.json");
+    let value = serde_json::json!({ "enabled": enabled }).to_string();
+    tokio::fs::write(&path, value.as_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Update the Discord Rich Presence activity. Called by the frontend on state transitions.
+#[tauri::command]
+async fn update_discord_rpc(
+    state: State<'_, AppState>,
+    model: String,
+    activity_str: String,
+    message_count: u32,
+) -> Result<(), String> {
+    let mut rpc = state.discord.lock().await;
+    if !rpc.enabled {
+        return Ok(());
+    }
+    let ts = rpc.start_timestamp;
+    let client = match rpc.client.as_mut() {
+        Some(c) => c,
+        None => return Ok(()),
+    };
+
+    let details = format!("Using {} — {} msgs", model, message_count);
+    let state_text = if activity_str == "thinking" {
+        "Thinking...".to_string()
+    } else if activity_str == "idle" {
+        "Idle".to_string()
+    } else if let Some(tool) = activity_str.strip_prefix("tool:") {
+        format!("Running {}", tool)
+    } else {
+        activity_str
+    };
+
+    let _ = client.set_activity(
+        activity::Activity::new()
+            .state(&state_text)
+            .details(&details)
+            .timestamps(activity::Timestamps::new().start(ts))
+            .assets(
+                activity::Assets::new()
+                    .large_image("clauke_icon")
+                    .large_text("clauke — Claude Code Wrapper"),
+            ),
+    );
+    Ok(())
+}
+
+/// Check if Discord RPC is enabled (reads persisted preference).
+#[tauri::command]
+async fn get_discord_rpc_enabled() -> Result<bool, String> {
+    let path = data_dir()?.join("discord_rpc.json");
+    if !path.exists() {
+        return Ok(true); // Default: enabled
+    }
+    let content = tokio::fs::read_to_string(&path)
+        .await
+        .map_err(|e| e.to_string())?;
+    let val: serde_json::Value = serde_json::from_str(&content).unwrap_or(serde_json::json!({"enabled": true}));
+    Ok(val.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true))
+}
+
 pub fn run() {
     // Default cleanup: 7 days. The frontend can call cleanup_clipboard with the user's setting.
     cleanup_old_images(7);
+
+    // Read Discord RPC preference synchronously for startup
+    let discord_enabled = {
+        let path = data_dir().ok().map(|d| d.join("discord_rpc.json"));
+        path.and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+            .and_then(|v| v.get("enabled").and_then(|e| e.as_bool()))
+            .unwrap_or(true)
+    };
+
+    // Connect to Discord if enabled
+    let discord_state = if discord_enabled {
+        let mut client_opt = None;
+        let mut ts = 0i64;
+        let mut client = DiscordIpcClient::new(DISCORD_APP_ID);
+        if client.connect().is_ok() {
+            ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            let _ = client.set_activity(
+                activity::Activity::new()
+                    .state("Idle")
+                    .details("Using clauke")
+                    .timestamps(activity::Timestamps::new().start(ts))
+                    .assets(
+                        activity::Assets::new()
+                            .large_image("clauke_icon")
+                            .large_text("clauke — Claude Code Wrapper"),
+                    ),
+            );
+            client_opt = Some(client);
+        }
+        DiscordRpcState {
+            client: client_opt,
+            enabled: true,
+            start_timestamp: ts,
+        }
+    } else {
+        DiscordRpcState {
+            client: None,
+            enabled: false,
+            start_timestamp: 0,
+        }
+    };
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
             tabs: Arc::new(Mutex::new(HashMap::new())),
+            discord: Arc::new(Mutex::new(discord_state)),
         })
-        .invoke_handler(tauri::generate_handler![send_prompt, stop_claude, steer_claude, save_clipboard_image, list_slash_commands, cleanup_clipboard, generate_title, list_agents, list_mcp_servers, add_mcp_server, remove_mcp_server, list_hooks, add_hook, remove_hook, storage_read, storage_write, storage_delete, get_cli_mode, list_directory, detect_editors, open_in_editor, check_claude_cli, read_file_contents, write_file_contents])
+        .invoke_handler(tauri::generate_handler![send_prompt, stop_claude, steer_claude, save_clipboard_image, list_slash_commands, cleanup_clipboard, generate_title, list_agents, list_mcp_servers, add_mcp_server, remove_mcp_server, list_hooks, add_hook, remove_hook, storage_read, storage_write, storage_delete, get_cli_mode, list_directory, detect_editors, open_in_editor, check_claude_cli, read_file_contents, write_file_contents, toggle_discord_rpc, update_discord_rpc, get_discord_rpc_enabled])
         .run(tauri::generate_context!())
         .expect("error while running clauke");
 }
