@@ -1024,7 +1024,7 @@ async fn write_file_contents(path: String, content: String) -> Result<(), String
 
 /// The Discord Application ID for clauke.
 /// Create your own at https://discord.com/developers/applications if needed.
-const DISCORD_APP_ID: &str = "1354941809673576508";
+const DISCORD_APP_ID: &str = "1334718443118788670";
 
 /// Toggle Discord Rich Presence on or off. Persists the preference.
 #[tauri::command]
@@ -1044,12 +1044,12 @@ async fn toggle_discord_rpc(state: State<'_, AppState>, enabled: bool) -> Result
                 let _ = client.set_activity(
                     activity::Activity::new()
                         .state("Idle")
-                        .details("Using clauke")
+                        .details("Using Clauke")
                         .timestamps(activity::Timestamps::new().start(ts))
                         .assets(
                             activity::Assets::new()
                                 .large_image("clauke_icon")
-                                .large_text("clauke — Claude Code Wrapper"),
+                                .large_text("Clauke - Claude Code Wrapper"),
                         ),
                 );
                 rpc.client = Some(client);
@@ -1112,7 +1112,7 @@ async fn update_discord_rpc(
             .assets(
                 activity::Assets::new()
                     .large_image("clauke_icon")
-                    .large_text("clauke — Claude Code Wrapper"),
+                    .large_text("Clauke - Claude Code Wrapper"),
             ),
     );
     Ok(())
@@ -1163,7 +1163,7 @@ pub fn run() {
                     .assets(
                         activity::Assets::new()
                             .large_image("clauke_icon")
-                            .large_text("clauke — Claude Code Wrapper"),
+                            .large_text("Clauke - Claude Code Wrapper"),
                     ),
             );
             client_opt = Some(client);
