@@ -1093,7 +1093,7 @@ async fn update_discord_rpc(
         None => return Ok(()),
     };
 
-    let details = format!("Using {} — {} msgs", model, message_count);
+    let details = format!("Using {} - {} msgs", model, message_count);
     let state_text = if activity_str == "thinking" {
         "Thinking...".to_string()
     } else if activity_str == "idle" {
