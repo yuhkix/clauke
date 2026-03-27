@@ -309,9 +309,23 @@ async fn cleanup_clipboard(max_age_days: u64) -> Result<u32, String> {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct McpServerEntry {
     name: String,
-    command: String,
-    args: Vec<String>,
-    env: HashMap<String, String>,
+    #[serde(rename = "type")]
+    server_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    args: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    env: Option<HashMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct McpHealthResult {
+    name: String,
+    healthy: bool,
+    error: Option<String>,
 }
 
 fn claude_settings_path() -> Result<std::path::PathBuf, String> {
@@ -346,21 +360,49 @@ async fn list_mcp_servers() -> Result<Vec<McpServerEntry>, String> {
 
     if let Some(mcp) = settings.get("mcpServers").and_then(|v| v.as_object()) {
         for (name, config) in mcp {
-            let command = config.get("command").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let args: Vec<String> = config.get("args")
-                .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-                .unwrap_or_default();
-            let env: HashMap<String, String> = config.get("env")
-                .and_then(|v| v.as_object())
-                .map(|obj| obj.iter().filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string()))).collect())
-                .unwrap_or_default();
+            let server_type = config
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("stdio")
+                .to_string();
+
+            let (command, args, env, url) = match server_type.as_str() {
+                "http" | "sse" => {
+                    let url = config.get("url").and_then(|v| v.as_str()).map(String::from);
+                    (None, None, None, url)
+                }
+                _ => {
+                    let command = config
+                        .get("command")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+                    let args: Option<Vec<String>> = config
+                        .get("args")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect()
+                        });
+                    let env: Option<HashMap<String, String>> = config
+                        .get("env")
+                        .and_then(|v| v.as_object())
+                        .map(|obj| {
+                            obj.iter()
+                                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                                .collect()
+                        });
+                    (command, args, env, None)
+                }
+            };
 
             servers.push(McpServerEntry {
                 name: name.clone(),
+                server_type,
                 command,
                 args,
                 env,
+                url,
             });
         }
     }
@@ -370,7 +412,14 @@ async fn list_mcp_servers() -> Result<Vec<McpServerEntry>, String> {
 
 /// Add or update an MCP server in ~/.claude/settings.json
 #[tauri::command]
-async fn add_mcp_server(name: String, command: String, args: Vec<String>, env: HashMap<String, String>) -> Result<(), String> {
+async fn add_mcp_server(
+    name: String,
+    server_type: String,
+    command: Option<String>,
+    args: Option<Vec<String>>,
+    env: Option<HashMap<String, String>>,
+    url: Option<String>,
+) -> Result<(), String> {
     let mut settings = read_claude_settings()?;
 
     let mcp_servers = settings
@@ -379,11 +428,24 @@ async fn add_mcp_server(name: String, command: String, args: Vec<String>, env: H
         .entry("mcpServers")
         .or_insert_with(|| serde_json::json!({}));
 
-    let server_config = serde_json::json!({
-        "command": command,
-        "args": args,
-        "env": env,
-    });
+    let server_config = match server_type.as_str() {
+        "http" | "sse" => serde_json::json!({
+            "type": server_type,
+            "url": url.unwrap_or_default(),
+        }),
+        _ => {
+            // stdio — omit "type" field to match Claude Code convention
+            let mut config = serde_json::json!({
+                "command": command.unwrap_or_default(),
+                "args": args.unwrap_or_default(),
+            });
+            let env_map = env.unwrap_or_default();
+            if !env_map.is_empty() {
+                config["env"] = serde_json::to_value(env_map).unwrap_or_default();
+            }
+            config
+        }
+    };
 
     mcp_servers
         .as_object_mut()
@@ -403,6 +465,83 @@ async fn remove_mcp_server(name: String) -> Result<(), String> {
     }
 
     write_claude_settings(&settings)
+}
+
+/// Check if an MCP server is reachable / healthy
+#[tauri::command]
+async fn check_mcp_server(
+    name: String,
+    server_type: String,
+    command: Option<String>,
+    url: Option<String>,
+) -> McpHealthResult {
+    match server_type.as_str() {
+        "http" | "sse" => {
+            let Some(url_str) = url else {
+                return McpHealthResult {
+                    name,
+                    healthy: false,
+                    error: Some("no URL configured".into()),
+                };
+            };
+            match reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(5))
+                .danger_accept_invalid_certs(true)
+                .build()
+            {
+                Ok(client) => match client.get(&url_str).send().await {
+                    Ok(resp) => {
+                        let status = resp.status().as_u16();
+                        // 2xx-4xx means the server is up (MCP may reject bare GET)
+                        if status < 500 {
+                            McpHealthResult {
+                                name,
+                                healthy: true,
+                                error: None,
+                            }
+                        } else {
+                            McpHealthResult {
+                                name,
+                                healthy: false,
+                                error: Some(format!("HTTP {}", status)),
+                            }
+                        }
+                    }
+                    Err(e) => McpHealthResult {
+                        name,
+                        healthy: false,
+                        error: Some(e.to_string()),
+                    },
+                },
+                Err(e) => McpHealthResult {
+                    name,
+                    healthy: false,
+                    error: Some(e.to_string()),
+                },
+            }
+        }
+        _ => {
+            // stdio: check if the command exists in PATH
+            let cmd = command.unwrap_or_default();
+            if cmd.is_empty() {
+                return McpHealthResult {
+                    name,
+                    healthy: false,
+                    error: Some("no command configured".into()),
+                };
+            }
+            let healthy = is_in_path(&cmd);
+            McpHealthResult {
+                name,
+                healthy,
+                error: if healthy {
+                    None
+                } else {
+                    Some(format!("'{}' not found in PATH", cmd))
+                },
+            }
+        }
+    }
 }
 
 // ── Hooks management ──
@@ -1012,7 +1151,7 @@ pub fn run() {
             tabs: Arc::new(Mutex::new(HashMap::new())),
             discord: Arc::new(Mutex::new(discord_state)),
         })
-        .invoke_handler(tauri::generate_handler![send_prompt, stop_claude, steer_claude, save_clipboard_image, list_slash_commands, cleanup_clipboard, generate_title, list_agents, list_mcp_servers, add_mcp_server, remove_mcp_server, list_hooks, add_hook, remove_hook, storage_read, storage_write, storage_delete, get_cli_mode, list_directory, detect_editors, open_in_editor, check_claude_cli, read_file_contents, write_file_contents, toggle_discord_rpc, update_discord_rpc, get_discord_rpc_enabled])
+        .invoke_handler(tauri::generate_handler![send_prompt, stop_claude, steer_claude, save_clipboard_image, list_slash_commands, cleanup_clipboard, generate_title, list_agents, list_mcp_servers, add_mcp_server, remove_mcp_server, check_mcp_server, list_hooks, add_hook, remove_hook, storage_read, storage_write, storage_delete, get_cli_mode, list_directory, detect_editors, open_in_editor, check_claude_cli, read_file_contents, write_file_contents, toggle_discord_rpc, update_discord_rpc, get_discord_rpc_enabled])
         .run(tauri::generate_context!())
         .expect("error while running clauke");
 }
