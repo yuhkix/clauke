@@ -216,7 +216,9 @@ async fn list_slash_commands(cwd: Option<String>) -> Result<Vec<DiscoveredComman
     Ok(commands)
 }
 
-/// Read .md files from a directory and extract command name + description from first heading.
+/// Read .md files from a directory and extract command name + description.
+/// Parses YAML frontmatter (description field) and falls back to first `# heading`.
+/// Skips commands whose description starts with "Deprecated".
 fn collect_commands_from_dir(dir: &PathBuf, source: &str, out: &mut Vec<DiscoveredCommand>) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
@@ -233,16 +235,26 @@ fn collect_commands_from_dir(dir: &PathBuf, source: &str, out: &mut Vec<Discover
             .unwrap_or("unknown");
         let name = format!("/{}", stem);
 
-        // Read first few lines to extract the heading as description
-        let description = if let Ok(content) = std::fs::read_to_string(&path) {
-            content
-                .lines()
-                .find(|l| l.starts_with("# "))
-                .map(|l| l.trim_start_matches("# ").to_string())
-                .unwrap_or_else(|| stem.to_string())
-        } else {
-            stem.to_string()
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => continue,
         };
+
+        // Try to extract description from YAML frontmatter (--- delimited)
+        let description = extract_frontmatter_description(&content)
+            .or_else(|| {
+                content
+                    .lines()
+                    .find(|l| l.starts_with("# "))
+                    .map(|l| l.trim_start_matches("# ").to_string())
+            })
+            .unwrap_or_else(|| stem.to_string());
+
+        // Skip deprecated commands
+        let desc_lower = description.to_lowercase();
+        if desc_lower.starts_with("deprecated") {
+            continue;
+        }
 
         out.push(DiscoveredCommand {
             name,
@@ -251,6 +263,30 @@ fn collect_commands_from_dir(dir: &PathBuf, source: &str, out: &mut Vec<Discover
             source: source.to_string(),
         });
     }
+}
+
+/// Extract the `description` field from YAML frontmatter (between `---` markers).
+fn extract_frontmatter_description(content: &str) -> Option<String> {
+    let trimmed = content.trim_start();
+    if !trimmed.starts_with("---") {
+        return None;
+    }
+    // Find the closing ---
+    let after_open = &trimmed[3..].trim_start_matches(['\r', '\n']);
+    let end = after_open.find("\n---").or_else(|| after_open.find("\r\n---"))?;
+    let frontmatter = &after_open[..end];
+
+    // Simple key: value parsing for description
+    for line in frontmatter.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("description:") {
+            let val = rest.trim().trim_matches('"').trim_matches('\'');
+            if !val.is_empty() {
+                return Some(val.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Send a steering message to the running Claude process in a specific tab.
